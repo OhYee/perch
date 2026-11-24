@@ -97,7 +97,10 @@ async function bridgeSession(id, procs) {
     const meta = await request(id, { op: 'info' }, 1000);
     const child = procs.find(p => p.pid === meta.pid && p.ppid === meta.bridgePid);
     const parent = procs.find(p => p.pid === meta.bridgePid);
-    const bridge = parent && ['node', 'nodejs'].includes(basename(parent.comm)) && parent.args.includes('claude-bridge.mjs');
+    if (!parent || !parent.args.includes('claude-bridge.mjs')) return null;
+    // Linux comm names a thread, not necessarily the executable that hosts the bridge.
+    const executable = process.platform === 'linux' ? await realpath(`/proc/${parent.pid}/exe`) : parent.comm;
+    const bridge = ['node', 'nodejs'].includes(basename(executable));
     const managed = meta.managed === true && bridge && parent.args.includes('--managed');
     if (!bridge || meta.id !== id || typeof meta.cwd !== 'string' ||
         (!managed && (!child || basename(child.comm) !== 'claude' || !child.args.includes(`--session-id ${meta.id}`)))) return null;

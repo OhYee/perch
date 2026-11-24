@@ -30,7 +30,7 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test"
+    "test": "node --experimental-strip-types --test --test-concurrency=1"
   },
   "dependencies": {
     "ws": "^8.23.0"

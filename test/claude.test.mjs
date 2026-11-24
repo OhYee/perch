@@ -147,6 +147,8 @@ test('bridge info reports current state without treating process liveness as act
     assert.equal(await privateBridgeDir(), true);
     await writeFile(script, `
       import net from 'node:net';
+      import { writeFileSync } from 'node:fs';
+      if (process.platform === 'linux') writeFileSync('/proc/self/comm', 'MainThread');
       let meta = { running: true };
       const server = net.createServer(socket => socket.once('data', data => {
         const req = JSON.parse(data);

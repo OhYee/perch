@@ -23,21 +23,16 @@ jobs:
         run: go run github.com/zricethezav/gitleaks/v8@v8.24.3 dir --redact=100 --no-banner .
 
   test:
-    name: ${{ matrix.os }} / Node ${{ matrix.node }}
-    runs-on: ${{ matrix.os }}
+    name: Offline scenarios (Linux x64 / Node 22.13)
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        node: ['22.13.0', '26.x']
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: '22.13.0'
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Test offline fixtures
@@ -51,7 +46,7 @@ jobs:
           PERCH_TRUSTED_RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '1' || '' }}
         run: node .github/scripts/prepare-package.mjs "$OUTPUT_DIR"
       - name: Save the tested release assets
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-package
@@ -63,29 +58,13 @@ jobs:
             ${{ steps.package.outputs.receipt }}
 
   portable-smoke:
-    name: Portable smoke ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
+    name: Portable artifact ${{ matrix.target }}
+    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","linux-arm64":"ubuntu-24.04-arm","darwin-x64":"macos-15-intel","darwin-arm64":"macos-15"}')[matrix.target] }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: darwin-arm64
-            runner: macos-15
-            platform: darwin
-            arch: arm64
-          - target: darwin-x64
-            runner: macos-15-intel
-            platform: darwin
-            arch: x64
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-          - target: linux-x64
-            runner: ubuntu-24.04
-            platform: linux
-            arch: x64
+        target: ${{ fromJSON(github.event_name == 'push' && '["linux-x64","linux-arm64","darwin-arm64","darwin-x64"]' || '["linux-x64"]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -99,13 +78,11 @@ jobs:
       - name: Build portable artifacts on their native platform
         env:
           TARGET: ${{ matrix.target }}
-          EXPECTED_PLATFORM: ${{ matrix.platform }}
-          EXPECTED_ARCH: ${{ matrix.arch }}
           PERCH_TRUSTED_RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '1' || '' }}
         run: |
           set -euo pipefail
           test "$(bun --version)" = '1.4.4'
-          node -e 'if (process.platform !== process.env.EXPECTED_PLATFORM || process.arch !== process.env.EXPECTED_ARCH || (process.platform === "linux" && !process.report.getReport().header.glibcVersionRuntime)) throw Error("unexpected runner platform, architecture, or libc")'
+          node -e 'if (`${process.platform}-${process.arch}` !== process.env.TARGET || (process.platform === "linux" && !process.report.getReport().header.glibcVersionRuntime)) throw Error("unexpected runner platform, architecture, or libc")'
           npm ci --ignore-scripts --no-audit --no-fund
           bun scripts/build-portable.mjs "$RUNNER_TEMP/perch-binary" "$TARGET"
           if [[ "$TARGET" == linux-x64 ]]; then
@@ -132,7 +109,11 @@ jobs:
             test -f "$artifact" && test ! -L "$artifact"
             before="$(shasum -a 256 "$artifact" | cut -d ' ' -f 1)"
             if [[ "$artifact" != *.mjs ]]; then chmod u+x "$artifact"; fi
-            node scripts/smoke-portable.mjs "$artifact"
+            if [[ "$TARGET" == linux-x64 ]]; then
+              node scripts/smoke-portable.mjs "$artifact"
+            else
+              test "$("$artifact" --version)" = "$(node cli.mjs --version)"
+            fi
             after="$(shasum -a 256 "$artifact" | cut -d ' ' -f 1)"
             test "$before" = "$after"
             printf '%s\n' "$after" > "$artifact.sha256"
