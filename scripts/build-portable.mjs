@@ -2,6 +2,7 @@ import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sourceVersion } from '../version.mjs';
 
 const targets = new Set(['mjs', 'darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64']);
 const [directory, target, ...extra] = process.argv.slice(2);
@@ -11,6 +12,11 @@ if (!directory || !targets.has(target) || extra.length) {
 if (Bun.version !== '1.4.4') throw new Error('Building portable artifacts requires Bun 1.4.4');
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+const repository = process.env.PERCH_TRUSTED_RELEASE === '1' ? process.env.GITHUB_REPOSITORY || '' : '';
+if (process.env.PERCH_TRUSTED_RELEASE === '1' && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+  throw new Error('Invalid GITHUB_REPOSITORY');
+}
 const output = join(resolve(directory), target === 'mjs' ? 'perch.mjs' : `perch-${target}`);
 const build = async options => {
   const result = await Bun.build(options);
@@ -33,6 +39,8 @@ const result = await build({
   banner,
   define: {
     __PERCH_PORTABLE__: 'true',
+    __PERCH_VERSION__: JSON.stringify(await sourceVersion(pkg, root)),
+    __PERCH_REPOSITORY__: JSON.stringify(repository),
     __PERCH_NATIVE__: String(target !== 'mjs'),
     __PERCH_OMP_EXTENSION__: JSON.stringify(await extension.outputs[0].text()),
     'process.env.WS_NO_BUFFER_UTIL': '"1"',

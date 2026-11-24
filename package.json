@@ -1,6 +1,7 @@
 {
   "name": "perch",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "perchReleaseChannel": "beta",
   "private": true,
   "description": "Inspect and message live local coding-agent sessions",
   "license": "MIT",
@@ -12,6 +13,8 @@
     "terminal-input.mjs",
     "portable-runtime.mjs",
     "view.mjs",
+    "update.mjs",
+    "version.mjs",
     "omp-extension.ts",
     "adapters/",
     "SECURITY.md",

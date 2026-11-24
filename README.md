@@ -10,6 +10,8 @@
 
 ### 从 GitHub Release 安装
 
+目前尚无已发布的官方版本或固定发行仓库。本地 beta 发行版本采用 `0.2.0-beta-<commit>` 格式，其中 `<commit>` 是构建所用提交的前 12 位小写十六进制字符；对应 tag 为 `v<版本>`。beta 不作为 latest。下述安装步骤仅适用于维护者发布可信 GitHub Release 后。请自行确认发行仓库，不要假定仓库所有者。
+
 从本项目的 GitHub Release 页面下载同一版本的 `SHA256SUMS.txt` 和所需文件到空目录。校验文件应来自可信的同一发行版本。只下载部分资产时，不要直接检查整个清单：先定义下列函数，它只接受清单中恰好一条文件名完全匹配的记录，并在缺失、重复或校验失败时返回非零。
 
 ```sh
@@ -24,10 +26,10 @@ verify_perch() {
 }
 ```
 
-**npm 包**：下载 `perch-<版本>.tgz`，将以下版本替换为下载的版本。校验成功后从本地文件安装；本包保持 private，不从 npm registry 发布。
+**npm 包**：下载 `perch-<版本>.tgz`，在以下命令中将 `version` 设为下载的实际版本（不含 tag 前缀 `v`）。校验成功后从本地文件安装；本包保持 private，不从 npm registry 发布。
 
 ```sh
-verify_perch perch-0.1.0.tgz && npm install -g --ignore-scripts ./perch-0.1.0.tgz && perch --help
+verify_perch "perch-${version}.tgz" && npm install -g --ignore-scripts "./perch-${version}.tgz" && perch --help
 ```
 
 **单文件 JavaScript**：下载 `perch.mjs`，校验成功后使用 Node.js 运行，无需安装依赖：
@@ -62,6 +64,22 @@ ln -s "$PWD/cli.mjs" "$HOME/.local/bin/perch"
 ```
 
 也可安装 Bun 1.4.4 后在源码目录运行 `bun scripts/build-portable.mjs <output-directory> <target>` 构建：`target` 为 `mjs`、`darwin-arm64`、`darwin-x64`、`linux-arm64` 或 `linux-x64`。输出分别为 `perch.mjs` 或 `perch-<target>`，内含运行所需依赖、桥接程序和 OMP 扩展。
+
+### 版本与更新
+
+`perch --version`（或 `perch -V`）显示当前版本；`perch version --json` 输出机器可读的版本信息。更新命令访问 GitHub Release，默认只选择比当前版本更新的稳定版本；beta 用户也可以更新到较新的稳定版本：
+
+```sh
+perch update --check
+perch update --check --json
+perch update
+perch update --check --beta  # 显式允许预发行版本
+perch update --beta
+```
+
+`--check` 只查询，不修改安装。官方发行工作流会将其 GitHub 仓库写入发行产物；源码和本机构建没有预设可信发行源，可在确认仓库后用 `perch update --check --repo OWNER/REPO` 指定。`--repo` 只对本次命令生效，不会修改发行源；若与已有可信发行源冲突，命令会拒绝执行。请确认发布者和值得信任的校验文件后再更新。
+
+独立二进制和 `perch.mjs` 更新自身前会校验发行资产的 SHA256；全局 npm 安装使用已校验的发行 tarball，而非 npm registry。源码检出不会被下载的发行文件覆盖：请保留本地修改，按命令提示在确认来源后手动更新；工作区有未提交改动时不会自动覆盖。更新失败会返回非零状态。
 
 ## 快速使用
 

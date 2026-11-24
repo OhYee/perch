@@ -48,6 +48,7 @@ jobs:
         id: package
         env:
           OUTPUT_DIR: ${{ runner.temp }}/perch-package
+          PERCH_TRUSTED_RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '1' || '' }}
         run: node .github/scripts/prepare-package.mjs "$OUTPUT_DIR"
       - name: Save the tested release assets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
@@ -100,6 +101,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           EXPECTED_PLATFORM: ${{ matrix.platform }}
           EXPECTED_ARCH: ${{ matrix.arch }}
+          PERCH_TRUSTED_RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '1' || '' }}
         run: |
           set -euo pipefail
           test "$(bun --version)" = '1.4.4'
@@ -112,6 +114,7 @@ jobs:
       - name: Smoke-test the exact artifacts on their native platform
         env:
           TARGET: ${{ matrix.target }}
+          PERCH_TRUSTED_RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '1' || '' }}
         run: |
           set -euo pipefail
           shopt -s nullglob dotglob
@@ -210,6 +213,8 @@ jobs:
         env:
           OUTPUT_DIR: ${{ runner.temp }}/perch-package
           RECEIPT_DIR: ${{ runner.temp }}/perch-receipts
+          VERSION: ${{ needs.release-intent.outputs.version }}
+          COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
           mkdir -p "$RECEIPT_DIR"

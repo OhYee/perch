@@ -3,7 +3,8 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { sourceVersion } from '../version.mjs';
 
 if (process.argv.length !== 3) throw Error('usage: node scripts/smoke-portable.mjs ARTIFACT');
 const source = resolve(process.argv[2]);
@@ -15,6 +16,8 @@ const env = { HOME: dir, PATH: bin, CODEX_HOME: join(dir, 'codex'), LC_ALL: 'C' 
 const opts = { cwd: dir, env, encoding: 'utf8', timeout: 40000 };
 const run = (...args) => execFileSync(mjs ? process.execPath : entry, mjs ? [entry, ...args] : args, opts);
 const json = (...args) => JSON.parse(run(...args, '--json'));
+const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const version = await sourceVersion(pkg, fileURLToPath(new URL('..', import.meta.url)));
 let id;
 try {
   copyFileSync(source, entry);
@@ -26,6 +29,7 @@ try {
   writeFileSync(join(bin, 'terminal-pane'), `#!${process.execPath}\n` +
     `require('node:fs').writeFileSync('pane.json', JSON.stringify(process.argv.slice(2)));\n` +
     `console.log(JSON.stringify({backend:'tmux',pane:'fixture'}));\n`, { mode: 0o755 });
+  assert.equal(run('--version').trim(), version);
   assert.match(run('--help', '--lang', 'en'), /perch list/);
   const { path, status } = json('integration', 'install', 'omp');
   assert.equal(status, 'installed');

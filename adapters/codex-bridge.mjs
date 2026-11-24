@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import net from 'node:net';
 import { managedDir, privateManagedDir } from './codex.mjs';
+import { clientVersion } from '../portable-runtime.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const child = spawn('codex', ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'ignore'] });
@@ -200,7 +201,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { void shut
 try {
   await mkdir(managedDir(), { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
   await privateManagedDir();
-  await nativeRequest('initialize', { clientInfo: { name: 'agent-session', version: '0.1.0' }, capabilities: { experimentalApi: true } });
+  await nativeRequest('initialize', { clientInfo: { name: 'agent-session', version: clientVersion }, capabilities: { experimentalApi: true } });
   child.stdin.write(JSON.stringify({ method: 'initialized', params: {} }) + '\n');
   const params = { cwd: process.cwd() };
   if (process.argv[2]) params.model = process.argv[2];

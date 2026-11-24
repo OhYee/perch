@@ -126,6 +126,52 @@ const chinese = new Map(Object.entries({
   'Claude bridge session:': 'Claude 桥接会话：',
   'Reconnect the local Perch bridge after a cancelled session transition': '会话切换取消后重新连接本地 Perch 桥接',
   'Perch bridge reconnected': 'Perch 桥接已重新连接',
+  'Invalid semantic version': '版本号格式无效',
+  'Invalid release channel': '发行渠道无效',
+  'Invalid package version': '软件包版本号无效',
+  'A Git commit is required for a beta version': '测试版版本号需要 Git 提交号',
+  'Cannot determine the Git commit for this beta source checkout': '无法确定此测试版源码检出的 Git 提交号',
+  'Invalid GitHub repository': 'GitHub 仓库无效',
+  '--repo must be OWNER/REPO': '--repo 必须为 OWNER/REPO 格式',
+  '--repo does not match this installation\'s release repository': '--repo 与此安装的发行仓库不匹配',
+  'No trusted release repository is configured; specify --repo OWNER/REPO': '未配置可信的发行仓库；请指定 --repo OWNER/REPO',
+  'GitHub release request failed': 'GitHub 发行版请求失败',
+  'Invalid GitHub release response': 'GitHub 返回的发行版响应无效',
+  'Duplicate GitHub release tag': 'GitHub 发行版标签重复',
+  'Invalid GitHub release publication time': 'GitHub 发行版发布时间无效',
+  'Too many GitHub release pages to determine the latest release safely': 'GitHub 发行版页数过多，无法安全地确定最新版本',
+  'No published stable or beta release found': '未找到已发布的稳定版或测试版',
+  'No published stable release found; use --beta to include beta releases': '未找到已发布的稳定版；使用 --beta 可包含测试版',
+  'Cannot determine the newest beta release from its publication time': '无法根据发布时间确定最新测试版',
+  'Cannot determine the installed beta release order; update manually': '无法确定已安装测试版的顺序；请手动更新',
+  'Invalid release download URL': '发行版下载地址无效',
+  'Release response has no body': '发行版响应没有内容',
+  'Release response is too large': '发行版响应过大',
+  'Invalid release assets': '发行版资产无效',
+  'Invalid or duplicate release asset': '发行版资产无效或重复',
+  'Invalid release asset URL': '发行版资产地址无效',
+  'Invalid release asset redirect': '发行版资产重定向无效',
+  'Untrusted release asset redirect': '发行版资产重定向不可信',
+  'Too many release asset redirects': '发行版资产重定向次数过多',
+  'Invalid or duplicate release checksum': '发行版校验值无效或重复',
+  'Release asset has no body': '发行版资产没有内容',
+  'Release asset is too large': '发行版资产过大',
+  'Could not write release asset': '无法写入发行版资产',
+  'Release asset checksum mismatch': '发行版资产校验值不匹配',
+  'Downloaded asset changed during update': '下载的资产在更新过程中发生变化',
+  'Installation entry must be an absolute path': '安装入口必须是绝对路径',
+  'Installation entry must be a regular file with one link': '安装入口必须是只有一个硬链接的普通文件',
+  'Installation changed during update; retry after checking it': '安装文件在更新过程中发生变化；请检查后重试',
+  'Could not detect the global npm prefix; update the package manually': '无法确定 npm 全局安装前缀；请手动更新软件包',
+  'Invalid global npm prefix; update the package manually': 'npm 全局安装前缀无效；请手动更新软件包',
+  'Not a verified global npm installation; update this package manually from the verified release tarball': '无法确认这是全局 npm 安装；请使用校验过的发行压缩包手动更新',
+  'Global npm installation changed or has a different version; update it manually': '全局 npm 安装已变更或版本不一致；请手动更新',
+  'Updater temporary directory is not private': '更新程序的临时目录不是私有目录',
+  'Invalid installation kind or update mode': '安装类型或更新模式无效',
+  'Updater transport is unavailable': '更新程序的传输方式不可用',
+  'Source checkout detected; update it manually after checking for local changes (for example, git pull --ff-only and npm ci --ignore-scripts)': '检测到源码检出；请检查本地改动后手动更新（例如执行 git pull --ff-only 和 npm ci --ignore-scripts）',
+  'No release binary is available for this platform': '此平台没有可用的发行版二进制文件',
+  'Global npm update failed; inspect the installation and update manually if necessary': '全局 npm 更新失败；请检查安装并在必要时手动更新',
 }));
 
 const legacyDiagnostics = new Map([
@@ -141,6 +187,10 @@ export function translateDiagnostic(message, lang) {
   if (typeof message === 'string') {
     const code = /^Codex app-server rejected (-?\d+|[A-Za-z_][A-Za-z0-9_.-]*)$/.exec(message);
     if (code) return `Codex app-server 拒绝了请求（错误码 ${code[1]}）`;
+    const http = /^(GitHub releases|Release asset) request failed \(HTTP (\d{3})\)$/.exec(message);
+    if (http) return `${http[1] === 'GitHub releases' ? 'GitHub 发行版' : '发行版资产'}请求失败（HTTP ${http[2]}）`;
+    const missing = /^Missing (release asset|checksum for) ([A-Za-z0-9_.-]+)$/.exec(message);
+    if (missing) return `缺少${missing[1] === 'release asset' ? '发行版资产' : '校验值'}：${missing[2]}`;
   }
   return message;
 }

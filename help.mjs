@@ -22,10 +22,42 @@ const syntax = {
   wait: ['perch wait <id> [--timeout seconds] [--json] [--lang zh|en]'],
   close: ['perch close <id> [--json] [--lang zh|en]'],
   integration: ['perch integration install omp [--json] [--lang zh|en]'],
+  version: ['perch --version | -V', 'perch version [--json] [--lang zh|en]'],
+  update: ['perch update [--check] [--beta] [--json] [--repo OWNER/REPO] [--lang zh|en]'],
   help: ['perch help [<command> ...] [--lang zh|en]'],
 };
 
 const pages = {
+  version: {
+    en: {
+      purpose: 'Show the installed Perch version.',
+      details: '--json emits an object with a version field.',
+      examples: 'perch --version\nperch version --json',
+    },
+    zh: {
+      purpose: '显示已安装的 Perch 版本。',
+      details: '--json 输出包含 version 字段的对象。',
+      examples: 'perch -V\nperch version --json',
+    },
+  },
+  update: {
+    en: {
+      purpose: 'Check for or install the latest GitHub Release.',
+      details: `Only stable releases are considered by default; --beta also considers prereleases.
+--check reports availability without installing. --json emits current, latest, and status.
+--repo OWNER/REPO selects the release repository when the installation has no trusted origin.
+Source checkouts are never overwritten by release files.`,
+      examples: 'perch update --check\nperch update --beta --check\nperch update --check --repo OWNER/REPO --json\nperch update',
+    },
+    zh: {
+      purpose: '检查或安装最新的 GitHub 发行版。',
+      details: `默认只检查稳定版；--beta 也检查预发行版。
+--check 只检查，不安装。--json 输出 current、latest 和 status。
+安装包没有可信来源时，使用 --repo OWNER/REPO 指定发行仓库。
+不会使用发行文件覆盖源码目录。`,
+      examples: 'perch update --check\nperch update --beta --check\nperch update --check --repo OWNER/REPO --json\nperch update',
+    },
+  },
   list: {
     en: {
       purpose: 'Discover local sessions and their capabilities.',

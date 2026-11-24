@@ -36,6 +36,10 @@ function fakeGh(options = {}) {
   const gh = args => {
     calls.push(args);
     if (args.includes('--paginate')) {
+      if (args.includes('.[] | select(.draft == false and .prerelease == true) | .tag_name')) {
+        const betaReleases = options.betaReleases ?? [{ tag_name: `v${version}-beta-${'b'.repeat(12)}`, draft: false, prerelease: true }];
+        return betaReleases.filter(release => release.draft === false && release.prerelease === true).map(release => release.tag_name).join('\n');
+      }
       listings++;
       return options.existing || (options.concurrent && listings > 1) ? `v${version}\n` : '';
     }
@@ -53,16 +57,29 @@ function fakeGh(options = {}) {
   return { gh, calls };
 }
 
-test('release intent requires a new valid version and nonempty notes', () => {
+test('release intent validates stable and commit-stamped beta transitions', () => {
+  const beta = `0.2.0-beta-${'a'.repeat(12)}`;
+  const nextBeta = `0.2.0-beta-${'b'.repeat(12)}`;
   assert.equal(releaseIntent('0.1.0', '0.1.0'), false);
-  assert.equal(releaseIntent(null, '0.1.0', notes), true);
-  assert.equal(releaseIntent('0.1.0', '0.2.0', notes), true);
-  assert.throws(() => releaseIntent('0.1.0', '0.2.0', undefined), /tracked, nonempty/);
+  assert.equal(releaseIntent(beta, beta), false);
+  for (const [previous, current] of [
+    [null, '0.1.0'], [null, beta], ['0.1.0', beta], [beta, nextBeta], [beta, '0.2.0'],
+    ['0.1.0', '0.1.1'], ['0.1.0', '0.2.0'], ['0.1.0', '1.0.0'],
+    ['2.3.4', '2.3.5'], ['2.3.4', '2.4.0'], ['2.3.4', '3.0.0'],
+    ['9007199254740992.3.4', '9007199254740993.0.0'],
+  ]) assert.equal(releaseIntent(previous, current, notes), true, `${previous} -> ${current}`);
+  for (const [previous, current] of [
+    ['2.3.4', '2.3.6'], ['2.3.4', '2.5.0'], ['2.3.4', '4.0.0'],
+    ['2.3.4', '2.4.1'], ['2.3.4', '3.1.0'], ['2.3.4', '3.0.1'],
+    ['2.3.4', '2.3.3'], ['2.3.4', '2.2.0'], ['2.3.4', '1.0.0'],
+    ['0.2.0', beta], [beta, '0.1.0'], [beta, '0.3.1'],
+  ]) assert.throws(() => releaseIntent(previous, current, notes), /transition/, `${previous} -> ${current}`);
+  assert.throws(() => releaseIntent('0.1.0', beta, undefined), /tracked, nonempty/);
   assert.throws(() => releaseIntent(null, '0.1.0', ' \n'), /tracked, nonempty/);
   assert.throws(() => releaseIntent('invalid', '0.1.0', notes), /semver/);
-  for (const input of ['../0.1.0', '0.1.0\nother=x', '01.1.0', '1.0.0-01', '', null]) assert.throws(() => validateVersion(input), /semver/);
-  assert.equal(validateVersion('1.2.3-rc.1+build.7'), '1.2.3-rc.1+build.7');
-  assert.equal(assetFilename('1.2.3+build.7'), 'perch-1.2.3-build.7.tgz');
+  for (const input of ['../0.1.0', '0.1.0\n', '0.1.0\nother=x', '01.1.0', '1.0.0-rc.1', '1.0.0+build', '1.0.0-beta.1', '1.0.0-beta-ABCDEF123456', '1.0.0-beta-abc', '', null]) assert.throws(() => validateVersion(input), /semver/);
+  assert.equal(validateVersion(beta), beta);
+  assert.equal(assetFilename(beta), `perch-${beta}.tgz`);
 });
 
 test('archive member validation fails closed for omissions and unexpected files', () => {
@@ -166,13 +183,36 @@ test('partial release failures explain that inspection is required', t => {
   assert.throws(() => publishRelease(gh, { ...request, output }), /may be partial.*inspect/);
 });
 
-test('pre-releases are marked without altering their tag or tested SHA', t => {
-  const preVersion = '0.2.0-rc.1';
-  const { output, receipts } = assetsFixture(t, preVersion);
-  finalizeReleaseAssets(output, receipts, preVersion);
+test('beta releases are commit-stamped and never latest', t => {
+  const betaVersion = `0.2.0-beta-${commit.slice(0, 12)}`;
+  const { output, receipts } = assetsFixture(t, betaVersion);
+  finalizeReleaseAssets(output, receipts, betaVersion);
   const { gh, calls } = fakeGh();
-  publishRelease(gh, { ...request, output, version: preVersion });
+  assert.throws(() => publishRelease(gh, { ...request, output, version: betaVersion, commit: 'b'.repeat(40) }), /does not match tested commit/);
+  assert.equal(calls.length, 0);
+  publishRelease(gh, { ...request, output, version: betaVersion });
   const create = calls.find(args => args[0] === 'release');
-  assert.equal(create.includes('--prerelease'), true);
-  assert.equal(create.includes('v0.2.0-rc.1'), true);
+  assert.ok(create.includes('--prerelease'));
+  assert.ok(create.includes('--latest=false'));
+  assert.ok(create.includes(`v${betaVersion}`));
+});
+
+test('stable release requires a published non-draft beta of the same base before creating a tag', t => {
+  const { output, receipts } = assetsFixture(t);
+  finalizeReleaseAssets(output, receipts, version);
+  for (const betaReleases of [
+    [],
+    [{ tag_name: `v${version}-beta-${'b'.repeat(12)}`, draft: true, prerelease: true }],
+    [{ tag_name: `v${version}-beta-${'b'.repeat(12)}`, draft: false, prerelease: false }],
+    [{ tag_name: `v0.2.0-beta-${'b'.repeat(12)}`, draft: false, prerelease: true }],
+    [{ tag_name: `v${version}-beta-123`, draft: false, prerelease: true }],
+  ]) {
+    const { gh, calls } = fakeGh({ betaReleases });
+    assert.throws(() => publishRelease(gh, { ...request, output }), /requires a published, non-draft prerelease beta/);
+    assert.equal(calls.some(args => args.includes('POST')), false);
+  }
+  const { gh, calls } = fakeGh();
+  publishRelease(gh, { ...request, output });
+  assert.ok(calls.some(args => args.includes('POST')));
+  assert.equal(calls.find(args => args[0] === 'release').includes('--prerelease'), false);
 });

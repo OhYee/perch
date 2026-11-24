@@ -11,8 +11,8 @@
 
 ## 发行
 
-1. 准备版本变更：同步更新 `package.json` 和 `package-lock.json` 中的版本，并新增受版本控制的 `releases/v<version>.md`，如 [v0.1.0](releases/v0.1.0.md)。发行说明只写真实变更和已知限制。
+1. 准备版本变更：同步更新 `package.json` 和 `package-lock.json` 中的基础版本，并新增受版本控制的 `releases/v<基础版本>.md`，如 [v0.2.0](releases/v0.2.0.md)。发行说明只写真实变更和已知限制；同一版本线的 beta 与正式版共用这份说明。
 2. 在隔离环境验证改动和打包内容：运行相关测试，使用 `npm pack --ignore-scripts` 检查 tarball 只包含公开运行所需文件；使用 Bun 1.4.4 按 README 的构建命令生成 `perch.mjs` 和四个平台二进制，检查独立产物及 SHA256 校验值。不运行安装脚本或真实提供方作为默认验证。
-3. 将版本变更合入 `main`。`main` 上新版本的推送触发 GitHub Release，发布经过测试的同一提交的 npm tarball、`perch.mjs`、四个 `perch-<target>` 二进制及 `SHA256SUMS.txt`；正常流程不需要手工创建 tag 或批准。Linux 二进制面向 glibc，不构建 Windows 版本。包保持 `private`，不发布到 npm registry。
+3. 将版本变更合入 `main`。beta 通道的每个新提交会触发预发行；正式通道仅在版本或通道改变时触发发行。工作流发布经过测试的同一提交的 npm tarball、`perch.mjs`、四个 `perch-<target>` 二进制及 `SHA256SUMS.txt`；正常流程不需要手工创建 tag 或批准。Linux 二进制面向 glibc，不构建 Windows 版本。包保持 `private`，不发布到 npm registry。
 
 获得维护授权的 AI 可以提交版本 PR，并在仓库规则允许时合并；创建 tag、上传资产和发布交给上述工作流。首次推送 `main` 也会触发发行。不要绕过检查、覆盖已有 tag 或修改仓库安全设置；遇到部分发布，先检查现存 tag、草稿和附件。

@@ -6,6 +6,7 @@ import net from 'node:net';
 import WebSocket from 'ws';
 import { processes } from './processes.mjs';
 import { launchBridge } from './launch.mjs';
+import { clientVersion } from '../portable-runtime.mjs';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const nonInteractive = /(?:^|\s)(?:exec|e|review|login|logout|mcp|plugin|app-server|remote-control|app|completion|update|doctor|sandbox|debug|apply|queue|archive|delete|migrate-rollouts|migrate-nfs-db|unarchive|fork|cloud|exec-server|features|help|agents)(?:\s|$)/;
 const unavailable = 'This CLI process cannot be unambiguously associated with a loaded Codex thread on the shared app-server.';
@@ -96,7 +97,7 @@ async function rpc(operation, timeoutMs = 10000) {
     ws.on('open', () => {
       opened = true;
       (async () => {
-        await request('initialize', { clientInfo: { name: 'agent-session', version: '0.1.0' }, capabilities: { experimentalApi: true } });
+        await request('initialize', { clientInfo: { name: 'agent-session', version: clientVersion }, capabilities: { experimentalApi: true } });
         ws.send(JSON.stringify({ method: 'initialized', params: {} }));
         const value = await operation(request);
         finish(null, value);

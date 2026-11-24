@@ -11,7 +11,7 @@ import { translateDiagnostic } from './diagnostics.mjs';
 import { overview, commandHelp, sessionStatus } from './help.mjs';
 import { followConversation } from './view.mjs';
 import { sendTerminalInput, supportedTerminalKeys } from './terminal-input.mjs';
-import { cliInvocation, embeddedOmpExtension } from './portable-runtime.mjs';
+import { cliInvocation, embeddedOmpExtension, getVersion, repository, kind, entry } from './portable-runtime.mjs';
 
 const providers = ['omp', 'codex', 'claude'];
 const labels = {
@@ -28,7 +28,7 @@ const style = (text, code, stream = process.stdout) =>
   stream.isTTY && !Object.hasOwn(process.env, 'NO_COLOR') && process.env.TERM !== 'dumb' && !process.argv.slice(2).includes('--json')
     ? `\x1b[${code}m${text}\x1b[0m` : text;
 function highlightHelp(help) {
-  const token = /(\bperch\s+)(integration(?:\s+install(?:\s+omp)?)?|list|start|send|input|wait|history|view|close|help)\b|(?<![\w-])--[\w-]+|(?<![\w-])-[a-zA-Z](?![\w-])|<[^<>\n]+>|\b(?:idle|running|blocked|failed|stopped|unknown)\b/g;
+  const token = /(\bperch\s+)(integration(?:\s+install(?:\s+omp)?)?|list|start|send|input|wait|history|view|close|version|update|help)\b|(?<![\w-])--[\w-]+|(?<![\w-])-[a-zA-Z](?![\w-])|<[^<>\n]+>|\b(?:idle|running|blocked|failed|stopped|unknown)\b/g;
   return help.split('\n').map(line => {
     if (/^\s*(?:Usage:|用法：|Examples:|示例：)\s*$/.test(line)) return style(line, 1);
     return line.replace(token, (match, prefix, command) => {
@@ -225,6 +225,10 @@ async function installOmpIntegration() {
 
 async function run([command, ...args]) {
   const rootHelp = overview(lang);
+  if (command === '--version' || command === '-V') {
+    if (args.length) throw Error(tr('Version flags take no arguments', '版本选项不接受参数'));
+    return console.log(await getVersion());
+  }
   if (!command || command === '--help' || command === '-h' || (command === 'help' && !args.length)) {
     return console.log(highlightHelp(rootHelp));
   }
@@ -245,16 +249,31 @@ async function run([command, ...args]) {
   }
   const help = commandHelp(command, lang) ?? rootHelp;
   const options = { json: opt() };
+  if (command === 'update') Object.assign(options, { check: opt(), beta: opt(), repo: opt('string') });
   if (command === 'list') options.provider = opt('string');
   else if (command === 'history') Object.assign(options, { limit: opt('string'), all: opt() });
   else if (command === 'send') options.stdin = opt();
   else if (command === 'input') Object.assign(options, { key: opt('string'), enter: opt() });
   else if (command === 'start') Object.assign(options, { cwd: opt('string'), model: opt('string'), executable: opt('string'), native: opt(), pane: opt('string'), workspace: opt('string'), tab: opt('string') });
   else if (command === 'wait') options.timeout = opt('string');
-  else if (!['resume', 'close', 'integration', 'view'].includes(command)) throw Error(tr(`Unknown command: ${quote(command)}\n${rootHelp}`, `未知命令：${quote(command)}\n${rootHelp}`));
+  else if (!['resume', 'close', 'integration', 'view', 'version', 'update'].includes(command)) throw Error(tr(`Unknown command: ${quote(command)}\n${rootHelp}`, `未知命令：${quote(command)}\n${rootHelp}`));
   let values, positionals;
   try { ({ values, positionals } = parseArgs({ args: command === 'start' ? beforeBoundary : args, options, allowPositionals: true })); }
   catch (error) { throw argumentError(error); }
+  if (command === 'version' || command === 'update') {
+    if (positionals.length) throw Error(tr(`${command} takes no positional arguments`, `${command} 不接受位置参数`));
+    const version = await getVersion();
+    if (command === 'version') return values.json ? json({ version }) : console.log(version);
+    const { runUpdate } = await import('./update.mjs');
+    const result = await runUpdate({ version, repository, kind, entry, check: !!values.check, beta: !!values.beta, repo: values.repo });
+    if (values.json) return json(result);
+    const message = {
+      up_to_date: tr('Already up to date', '已是最新版本'),
+      available: tr('Update available', '有可用更新'),
+      updated: tr('Updated', '已更新'),
+    }[result.status];
+    return console.log(`${message}: ${quote(result.current)} → ${quote(result.latest)}`);
+  }
   if (command === 'integration') {
     if (positionals.length !== 2 || positionals[0] !== 'install' || positionals[1] !== 'omp') {
       const topic = positionals[0] === 'install'
