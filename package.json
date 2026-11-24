@@ -1,0 +1,34 @@
+{
+  "name": "agent-session",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Inspect and message live local coding-agent sessions",
+  "license": "MIT",
+  "files": [
+    "cli.mjs",
+    "diagnostics.mjs",
+    "help.mjs",
+    "locale.mjs",
+    "terminal-input.mjs",
+    "view.mjs",
+    "omp-extension.ts",
+    "adapters/",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "AGENTS.md",
+    "releases/*.md"
+  ],
+  "type": "module",
+  "bin": {
+    "agent-session": "./cli.mjs"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test"
+  },
+  "dependencies": {
+    "ws": "^8.23.0"
+  }
+}

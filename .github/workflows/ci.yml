@@ -1,0 +1,114 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Scan clean checkout for secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Scan tracked candidate files
+        env:
+          GOTOOLCHAIN: local
+        run: go run github.com/zricethezav/gitleaks/v8@v8.24.3 dir --redact=100 --no-banner .
+
+  test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['22.13.0', '26.x']
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test offline fixtures
+        run: npm test
+      - name: Test release helpers
+        run: node --test .github/scripts/release.test.mjs
+      - name: Prepare and smoke-test the package
+        id: package
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/agent-session-package
+        run: node .github/scripts/prepare-package.mjs "$OUTPUT_DIR"
+      - name: Save the tested release assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-package
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ runner.temp }}/agent-session-package/SHA256SUMS.txt
+
+  release-intent:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.intent.outputs.release }}
+      version: ${{ steps.intent.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '26.x'
+      - name: Determine whether this push changes the version
+        id: intent
+        env:
+          BEFORE: ${{ github.event.before }}
+          COMMIT: ${{ github.sha }}
+        run: node .github/scripts/release-intent.mjs
+
+  release:
+    needs: [test, secret-scan, release-intent]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.release-intent.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ needs.release-intent.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '26.x'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-package
+          path: ${{ runner.temp }}/agent-session-package
+      - name: Publish the exact tested release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT: ${{ github.sha }}
+          VERSION: ${{ needs.release-intent.outputs.version }}
+          OUTPUT_DIR: ${{ runner.temp }}/agent-session-package
+        run: node .github/scripts/publish-release.mjs
