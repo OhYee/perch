@@ -1,6 +1,6 @@
 # Perch
 
-用一个 CLI 管理本机当前用户的 OMP、Codex CLI 和 Claude Code 对话。可以发现已有会话，也可以新建可由脚本控制的后台会话；不需要常驻的中心服务。
+用一个 CLI 管理本机当前用户的 OMP、Codex CLI、Claude Code 和 Antigravity CLI（`agy`）对话。可以发现已有会话，也可以新建可由脚本控制的后台会话；不需要常驻的中心服务。
 
 [下载最新稳定版](https://github.com/OhYee/perch/releases/latest) · [快速使用](#快速使用) · [由总管 agent 管理对话](#让总管-agent-管理一轮对话) · [贡献指南](CONTRIBUTING.md)
 
@@ -8,7 +8,7 @@
 
 按需选择以下一种安装方式。源码、npm 包和 `perch.mjs` 需要 Node.js 22.13 或更高版本；npm 包和源码还需要 npm。独立二进制运行时不需要 Node.js 或 Bun。Bun 1.4.4 仅用于从源码构建独立产物。
 
-所有方式都需要另行安装并配置所用的 OMP、Codex CLI 或 Claude Code；pane 功能另需 `terminal-pane`，部分示例使用 `jq`。支持 macOS 和 Linux（Linux 二进制需要 glibc），不支持 Windows 原生运行。本机发现与发送在 macOS 上验证，其他平台取决于提供方及终端。Claude 新增的托管路径尚未实机验证；各提供方已有会话的能力见下表。
+所有方式都需要另行安装并配置所用的 OMP、Codex CLI、Claude Code 或 Antigravity CLI；pane 功能另需 `terminal-pane`，部分示例使用 `jq`。Perch 支持 macOS 和 Linux（Linux 二进制需要 glibc），不支持 Windows 原生运行。会话能力取决于提供方和终端，见下表；Claude 的托管路径尚未实机验证。
 
 ### 从 GitHub Release 安装
 
@@ -172,7 +172,7 @@ perch resume "$id"    # 重新打开同一段对话，不会发消息
 
 - OMP 对话 ID 为 `omp:<原生会话 UUID>`：关闭后仍可用 `history` 读取已保存的托管记录；`resume` 打开同一记录，已经运行则复用，不补发消息或自动续做。旧的 `omp:<PID>:<随机值>` 不是持久 ID；对仍在线的会话，重新 `list --provider omp`，替换脚本中保存的旧值。`omp:pid-…` 仅标识进程，不能恢复。暂不支持恢复已关闭的原生 TUI、Codex 或 Claude。
 - 托管模式的 `start` 不带消息；模型可用 `--model` 指定。多行消息可通过 `perch send "$id" --stdin` 发送。
-- OMP 托管和原生启动都支持 `--model 模型名[:思考等级]`；省略等级时沿用 OMP 默认值。例如 `perch start omp --model MODEL --json`，请将 `MODEL` 替换为本机可用模型。提供方原始参数放在 `--` 之后，`--json` 等会话选项放在之前。原生模式逐项透传；托管 OMP 仅支持 `-e`/`--extension` 和 `--thinking`，其余托管模式不接受额外参数。
+- OMP 托管和原生启动都支持 `--model 模型名[:思考等级]`；省略等级时沿用 OMP 默认值。例如 `perch start omp --model MODEL --json`，请将 `MODEL` 替换为本机可用模型。提供方原始参数放在 `--` 之后，`--json` 等会话选项放在之前。原生 OMP、Codex 和 Claude 原样透传，托管 OMP 仅支持 `-e`/`--extension` 和 `--thinking`；其余托管模式及原生 agy 不接受额外参数。
 - `wait ID` 默认不设时限；已经空闲（包括尚未发过消息）就立即返回。`--timeout N` 限制等待秒数，`--timeout 0` 只查当前状态。`--json` 返回状态，不附带聊天正文。要看回复，另用 `history`。
 - `wait` 退出码：`0` 已完成；`2` 等待超时；`3` 需要人工输入；`1` 失败、中断或参数错误。脚本应按退出码分支；需要人工介入时不要自动同意，也不要把部分回复当最终结果。
   没有通过此 CLI 回答权限弹窗的命令。`needs_input` 是交给人的信号，不表示可以用下一条 `send` 代替批准。在没有交互窗口的托管会话中，先检查历史，再决定是否关闭并换到原生终端。
@@ -210,6 +210,7 @@ perch start omp --pane tmux --workspace work --tab agents
 perch start omp "你好" --pane right --native
 perch start omp --native --pane right --cwd "$PWD" --model MODEL --json
 perch start codex --native --pane right --cwd "$PWD" --model MODEL --json
+perch start agy --native --pane right
 
 # 指定 Tern 工作区和标签页
 perch start claude --native --pane tern --workspace work --tab agents --cwd "$PWD" --model MODEL --executable /absolute/path/to/claude --json
@@ -217,6 +218,8 @@ perch start claude --native --pane tern --workspace work --tab agents --cwd "$PW
 perch start omp --native --pane herdr --workspace work --tab agents
 perch start omp --native --pane tmux --workspace work --tab agents
 ```
+
+对原生 agy，初始消息通过 `--prompt-interactive` 传入；不能以 `-` 开头，也不接受 `--` 之后的额外参数。敏感消息不要放在启动参数中。
 
 原生模式的 JSON 回执只有 `{provider, mode: "native", pane: {backend, id}}`。其中 `pane.id` 是窗格标识，不是聊天会话 ID，不能直接用于 `send`、`history`、`wait` 或 `close`。不同提供方及集成对原生会话的发现和可用操作各不相同；通过 `list` 查看实际能力，不要假定原生 TUI 一定可以被程序控制。
 
@@ -240,6 +243,7 @@ perch history "$id" --all --json | jq -r '.[] | select(.role == "assistant") | .
 | OMP | 持有会话锁且能绑定同一份日志时可读聊天分支；未写盘的终端可能只有进程线索。加载本地扩展后可向原终端发送消息 | `perch start omp`，通过原生 RPC 启动新会话 |
 | Codex CLI | 共享 app-server 上已加载的 CLI 线程可以对话；不能绑定线程的终端仅作进程线索，不从归档恢复 | `perch start codex`，不要求先开一个 TUI |
 | Claude Code | 从 `claude agents --json` 发现活会话，唯一匹配本地记录时可读历史；普通 TUI 无程序化输入口 | `perch start claude --executable /绝对路径/claude`，使用下述可信原生文件。新增托管路径尚未实机验证 |
+| Antigravity CLI（`agy`） | 发现原生终端进程；启用状态行且查询期间能验证当时的对话时，显示原生会话身份。原生会话不能读取历史或控制 | `perch start agy`，为每个会话启动独立的 `agy acp` |
 
 要让以后启动的 OMP 会话自动加载扩展，可由当前用户主动安装：
 
@@ -275,6 +279,57 @@ node "$project/adapters/claude-bridge.mjs" /absolute/path/to/claude
 ```
 
 Claude 启动命令中的路径应替换为您信任的原生 Claude 可执行文件。请在可信工作目录运行：Claude 的非交互模式会加载该目录适用的配置。不代答权限询问；需要询问的操作被拒绝。从另一个终端用 `perch` 聊天，原终端按 Ctrl-C 退出。OMP 扩展和 Claude 入口都只在本机同一系统用户内开放会话读写。
+
+### Antigravity CLI：托管会话和原生终端
+
+先确认 `PATH` 指向可信的 `agy`，并按 Antigravity CLI 的要求登录。Perch 不代登录。
+`start agy` 通过专用的本地 ACP 连接新建会话，不发送初始消息，也不查找已有对话。
+不传 `--model` 时使用 agy 默认模型；指定模型不可用时，启动会失败，不会改用默认模型。
+
+托管 agy 在 `${XDG_STATE_HOME:-$HOME/.local/state}/agent-session/agy` 保存恢复所需的会话标识。如果 Perch 拒绝状态目录，不要修改共享目录权限或使用符号链接；请在自己控制的目录下新建私有目录（所有者为当前用户，权限 `0700`）：
+
+```sh
+mkdir -m 700 "$HOME/.perch-state" && export XDG_STATE_HOME="$HOME/.perch-state"
+```
+
+只需创建一次。以后在运行这些会话的命令前设置同一个 `XDG_STATE_HOME`。切换状态目录不会迁移旧会话。
+
+```sh
+job=$(perch start agy --cwd "$PWD" --json) || exit 1
+id=$(printf '%s' "$job" | jq -er .id) || exit 1
+printf '%s\n' '先概括你看到的项目结构，不要修改文件。' | perch send "$id" --stdin || exit $?
+perch wait "$id" --timeout 300 || exit $?
+perch history "$id" --limit 2
+perch close "$id"
+```
+
+消息走 ACP，不转成按键。需要人工授权时，`wait` 返回 `needs_input`；Perch 不批准权限请求。
+如果 `send` 返回 `accepted: null`，先查历史或等待，不要重发。
+
+Perch 创建的托管对话使用 `agy:<UUID>`；请保留 `start` 返回的完整 ID。
+`close` 会结束当前托管进程；之后不会在 `list` 显示，要读历史或继续对话须先显式执行 `perch resume "$id"`。
+恢复会使用同一 ID，不会补发消息、自动续做任务或接管已有 TUI。提供方不支持回载时，`resume` 会报错，不会另开一个对话。
+
+托管 agy 最多保留最近 1,024 条、合计 4 MiB 的聊天文本。`resume` 会在这个窗口内回放对话，不会仅因旧消息超出窗口而失败。
+`history` 默认最多返回 20 条，`--limit N` 最多返回 N 条；`view` 也只显示窗口内最近 20 条。正在生成的回复可实时显示；如果回复超出保留上限，整条回复会被移除，`wait` 会报告失败。如果有消息被淘汰或省略，`history --all` 会报错，不会把保留窗口当成完整记录。
+
+对于已有原生终端，`perch list --provider agy` 不扫描归档。默认只显示可识别的活动进程（`agy:pid-…`）。
+macOS 的进程信息不保留参数边界：多词初始提示词或带空格的选项值可能使 Perch 无法确认启动方式，导致既不显示 PID，也无法验证状态行回调。若需要发现原生 TUI，请不带初始提示词启动，并避免使用含空格的选项值。
+
+在 macOS 的 agy 1.5.16 中，可选择启用状态行来识别当前对话。其他版本或平台目前只提供进程线索。
+若要启用，请在目标 agy 窗口手动输入：
+
+```text
+/statusline perch integration agy-statusline && :
+```
+
+使用可信的 Perch 可执行文件；也可用单引号括住其绝对路径来替代 `perch`。保留 `&& :`，以便 Perch 核实回调来源。
+**[`/statusline` 会修改并保存 agy 的状态行设置](https://antigravity.google/docs/cli/commands/statusline/)。**
+若要继续使用现有渲染器，请不要设置此命令；如需恢复，可在原窗口重新设置原命令，或用 `/statusline reset` 恢复内置状态行。
+Perch 不会代改设置，也不会向原窗口输入命令。
+
+只有查询期间收到新报告且能核实回调进程的父子关系，列表才会显示原生会话身份。agy 在状态变化时发送报告，闲置时不保证有新报告；如果沙箱拦截进程检查，或查询期间没有新报告，仍只显示进程线索。
+原生 agy 不支持 `history`、`view`、`send`、`wait` 或 `close`。状态行不能确认编辑器焦点或排除选择及权限弹窗，因此 `input` 拒绝文本、`--enter` 和具名按键。请在原窗口继续交互。
 
 ## 参与项目
 

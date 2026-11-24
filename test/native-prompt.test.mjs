@@ -29,7 +29,7 @@ console.log(JSON.stringify({ backend: backendFlag < 0 ? 'tern' : args[backendFla
   const provider = `#!${process.execPath}
 require('node:fs').appendFileSync(process.env.PROVIDER_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');
 `;
-  for (const name of ['omp', 'codex']) await writeFile(join(dir, name), provider, { mode: 0o755 });
+  for (const name of ['omp', 'codex', 'agy']) await writeFile(join(dir, name), provider, { mode: 0o755 });
   const env = { PATH: dir, HOME: dir, LC_ALL: 'en_US.UTF-8', PANE_LOG: paneLog, PROVIDER_LOG: providerLog };
   const run = (...args) => spawnSync(process.execPath, [cli, ...args], { env, encoding: 'utf8' });
   const lines = async path => {
@@ -94,10 +94,38 @@ test('invalid native prompts and managed prompts do not launch a pane or provide
     ['start', 'omp', 'first', 'second', '--native', '--pane', 'right'],
     ['start', 'omp', 'message', '--pane', 'right'],
     ['start', 'omp', '--', '--mode', 'json'],
+    ['start', 'agy', '--native', '--pane', 'right', '--', '--settings', f.dir],
+    ['start', 'agy', '--native', '--pane', 'right', '--', '--help'],
+    ['start', 'agy', '--', 'acp'],
+    ['start', 'agy', '--native', '--pane', 'right', '--executable', process.execPath],
+    ['start', 'agy', '--executable', process.execPath],
+    ['start', 'agy', '--native'],
+    ['start', 'agy', 'managed prompt'],
   ]) {
     const result = f.run(...args);
     assert.notEqual(result.status, 0, JSON.stringify(args));
   }
   assert.deepEqual(await f.panes(), []);
   assert.deepEqual(await f.providers(), []);
+});
+
+test('AGY native launches an interactive argv with an optional literal prompt and provider-specific environment', async t => {
+  const f = await fixture(t);
+  f.env.OMP_PROFILE = 'unrelated-profile';
+  f.env.CLAUDE_CONFIG_DIR = join(f.dir, 'unrelated-config');
+  const marker = join(f.dir, 'unexpected-shell-execution');
+  const prompt = `/statusline\n"quoted" $(touch ${marker}); --settings=not-a-file`;
+  for (const args of [[prompt, '--model', 'fixture-model'], []]) {
+    const result = f.run('start', 'agy', ...args, '--native', '--pane', 'right', '--json');
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { provider: 'agy', mode: 'native', pane: { backend: 'tern', id: 'test-pane' } });
+  }
+  assert.deepEqual(await f.providers(), [['--model', 'fixture-model', `--prompt-interactive=${prompt}`], []]);
+  const panes = await f.panes();
+  assert.equal(panes.length, 2);
+  for (const argv of panes) {
+    assert.ok(!argv.includes('--wait-output'));
+    assert.ok(argv.every(arg => !/^(?:OMP_PROFILE|CLAUDE_CONFIG_DIR)(?:=|$)/.test(arg)));
+  }
+  await assert.rejects(readFile(marker), { code: 'ENOENT' });
 });
