@@ -2,6 +2,8 @@
 
 用一个 CLI 管理本机当前用户的 OMP、Codex CLI 和 Claude Code 对话。可以发现已有会话，也可以新建可由脚本控制的后台会话；不需要常驻的中心服务。
 
+[下载最新稳定版](https://github.com/OhYee/perch/releases/latest) · [快速使用](#快速使用) · [由总管 agent 管理对话](#让总管-agent-管理一轮对话) · [贡献指南](CONTRIBUTING.md)
+
 ## 安装与要求
 
 按需选择以下一种安装方式。源码、npm 包和 `perch.mjs` 需要 Node.js 22.13 或更高版本；npm 包和源码还需要 npm。独立二进制运行时不需要 Node.js 或 Bun。Bun 1.4.4 仅用于从源码构建独立产物。
@@ -10,9 +12,16 @@
 
 ### 从 GitHub Release 安装
 
-目前尚无已发布的官方版本或固定发行仓库。本地 beta 发行版本采用 `0.2.0-beta-<commit>` 格式，其中 `<commit>` 是构建所用提交的前 12 位小写十六进制字符；对应 tag 为 `v<版本>`。beta 不作为 latest。下述安装步骤仅适用于维护者发布可信 GitHub Release 后。请自行确认发行仓库，不要假定仓库所有者。
+在 [OhYee/perch Releases](https://github.com/OhYee/perch/releases) 选择版本。日常使用选 **Latest**；标有 **Pre-release** 的 `x.y.z-beta-<commit>` 是测试版。没有 Node.js 时选独立二进制；已有 Node.js 时可选单文件 `perch.mjs`，或用 npm 从发行包安装全局 `perch` 命令。
 
-从本项目的 GitHub Release 页面下载同一版本的 `SHA256SUMS.txt` 和所需文件到空目录。校验文件应来自可信的同一发行版本。只下载部分资产时，不要直接检查整个清单：先定义下列函数，它只接受清单中恰好一条文件名完全匹配的记录，并在缺失、重复或校验失败时返回非零。
+把需要的文件和**同一版本**的 `SHA256SUMS.txt` 下载到空目录。例如，下载 v0.2.0 的单文件版（使用 GitHub CLI，也可从页面下载）：
+
+```sh
+version=0.2.0
+gh release download "v$version" --repo OhYee/perch -p perch.mjs -p SHA256SUMS.txt
+```
+
+安装或运行前，先在该目录定义下面的函数。它只校验选中的文件，无需下载全部产物：
 
 ```sh
 verify_perch() {
@@ -26,10 +35,10 @@ verify_perch() {
 }
 ```
 
-**npm 包**：下载 `perch-<版本>.tgz`，在以下命令中将 `version` 设为下载的实际版本（不含 tag 前缀 `v`）。校验成功后从本地文件安装；本包保持 private，不从 npm registry 发布。
+**npm 包**：从 Release 下载 `perch-0.2.0.tgz` 和校验清单。以下用 v0.2.0 举例；包不发布到 npm registry，不要用 `npm install -g perch` 代替。
 
 ```sh
-verify_perch "perch-${version}.tgz" && npm install -g --ignore-scripts "./perch-${version}.tgz" && perch --help
+verify_perch perch-0.2.0.tgz && npm install -g --ignore-scripts ./perch-0.2.0.tgz && perch --version
 ```
 
 **单文件 JavaScript**：下载 `perch.mjs`，校验成功后使用 Node.js 运行，无需安装依赖：
@@ -77,7 +86,7 @@ perch update --check --beta  # 显式允许预发行版本
 perch update --beta
 ```
 
-`--check` 只查询，不修改安装。官方发行工作流会将其 GitHub 仓库写入发行产物；源码和本机构建没有预设可信发行源，可在确认仓库后用 `perch update --check --repo OWNER/REPO` 指定。`--repo` 只对本次命令生效，不会修改发行源；若与已有可信发行源冲突，命令会拒绝执行。请确认发布者和值得信任的校验文件后再更新。
+`--check` 只查询，不修改安装。官方产物已绑定 `OhYee/perch`，无需传仓库名。源码和自行构建的版本没有预设发行源，可以用 `perch update --check --repo OhYee/perch` 查询。`--repo` 只对本次命令有效，不能覆盖官方产物绑定的仓库。
 
 独立二进制和 `perch.mjs` 更新自身前会校验发行资产的 SHA256；全局 npm 安装使用已校验的发行 tarball，而非 npm registry。源码检出不会被下载的发行文件覆盖：请保留本地修改，按命令提示在确认来源后手动更新；工作区有未提交改动时不会自动覆盖。更新失败会返回非零状态。
 
