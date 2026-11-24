@@ -3,10 +3,12 @@ export const sessionStatus = {
 };
 
 const syntax = {
-  list: ['perch list [--provider omp|codex|claude] [--json] [--lang zh|en]'],
+  list: ['perch list [--provider omp|codex|claude|agy] [--json] [--lang zh|en]'],
   start: [
     'perch start <omp|codex|claude> [--cwd dir] [--model model] [--executable path] [--pane right|tern|herdr|tmux] [--workspace name] [--tab name] [--json] [--lang zh|en] [-- provider-args...]',
     'perch start <omp|codex|claude> [prompt] --native --pane right|tern|herdr|tmux [--cwd dir] [--model model] [--executable path] [--workspace name] [--tab name] [--json] [--lang zh|en] [-- provider-args...]',
+    'perch start agy [--cwd dir] [--model model] [--pane right|tern|herdr|tmux] [--workspace name] [--tab name] [--json] [--lang zh|en]',
+    'perch start agy [prompt] --native --pane right|tern|herdr|tmux [--cwd dir] [--model model] [--workspace name] [--tab name] [--json] [--lang zh|en]',
   ],
   resume: ['perch resume <id> [--json] [--lang zh|en]'],
   send: [
@@ -21,7 +23,7 @@ const syntax = {
   view: ['perch view <id> [--lang zh|en]'],
   wait: ['perch wait <id> [--timeout seconds] [--json] [--lang zh|en]'],
   close: ['perch close <id> [--json] [--lang zh|en]'],
-  integration: ['perch integration install omp [--json] [--lang zh|en]'],
+  integration: ['perch integration install omp [--json] [--lang zh|en]', 'perch integration agy-statusline'],
   version: ['perch --version | -V', 'perch version [--json] [--lang zh|en]'],
   update: ['perch update [--check] [--beta] [--json] [--repo OWNER/REPO] [--lang zh|en]'],
   help: ['perch help [<command> ...] [--lang zh|en]'],
@@ -64,16 +66,21 @@ Source checkouts are never overwritten by release files.`,
       details: `--provider selects one provider; without it, all providers are queried.
 --json emits machine-readable output. Session status values are:
   idle | running | blocked | failed | stopped | unknown
-Status is reported by the host and does not guarantee a verifiable local process.`,
-      examples: 'perch list --provider omp --json',
+Status is reported by the host and does not guarantee a verifiable local process.
+Native agy TUIs appear as process clues unless a verified status line report
+identifies a current conversation during the query (macOS, agy 1.5.16).
+Archived agy conversations are not listed.`,
+      examples: 'perch list --provider omp --json\nperch list --provider agy',
     },
     zh: {
       purpose: '发现本机会话及其支持的操作。',
       details: `--provider 选择一个提供方；省略时查询全部提供方。
 --json 输出机器可读数据。会话 status 枚举：
   idle | running | blocked | failed | stopped | unknown
-状态由宿主报告，不保证存在可验证的本机进程。`,
-      examples: 'perch list --provider omp --json',
+状态由宿主报告，不保证存在可验证的本机进程。
+原生 agy TUI 默认只显示进程线索；macOS 的 agy 1.5.16 可在查询期间通过有效状态行报告识别当前对话。
+不列出归档对话。`,
+      examples: 'perch list --provider omp --json\nperch list --provider agy',
     },
   },
   start: {
@@ -83,7 +90,11 @@ Status is reported by the host and does not guarantee a verifiable local process
 --model selects a model. --executable is only for Claude and is required for
 Claude: provide the absolute path to a trusted native Claude executable.
 OMP (managed and native): --model MODEL[:LEVEL]. Omit :LEVEL to use OMP's default.
-Put provider options after --. Native mode forwards them verbatim. Managed OMP accepts -e/--extension and --thinking; other managed bridges do not accept extra arguments.
+Put provider options after -- except for agy, which accepts no extra arguments.
+Native OMP, Codex, and Claude forward them verbatim. Only managed OMP accepts
+additional arguments (-e/--extension and --thinking).
+Managed agy opens a private ACP session. Sign in to agy separately if required.
+An explicit --model must be offered by agy; Perch does not fall back to the default.
 Without --native, start creates a managed session without sending a prompt; use
 send to submit a message. Without --pane, no viewer is opened. --pane right opens
 a viewer in a split of the current terminal pane.
@@ -100,7 +111,9 @@ when requested.
 provider TUI instead of a managed session or viewer. Named backends use the same
 workspace and tab requirements and placement rules in both modes. An optional nonempty prompt
 must be a single positional argument; it is passed to the provider at startup.
-Omitting it starts the TUI without an initial prompt. --json returns only
+Omitting it starts the TUI without an initial prompt. Native agy uses
+--prompt-interactive and does not accept a positional prompt starting with -.
+--json returns only
 {provider, mode: "native", pane: {backend, id}}; pane.id is not a chat ID.
 There is no independent Perch bridge or daemon for native mode: the
 terminal backend owns the PTY and program lifetime. Detaching is not the same as
@@ -116,7 +129,9 @@ perch start omp --native --pane tmux --workspace work --tab agents
 perch start omp "你好" --pane right --native
 perch start omp --native --pane right --cwd "$PWD" --model MODEL --json
 perch start codex --native --pane right --cwd "$PWD" --model MODEL --json
-perch start claude --native --pane tern --workspace work --tab agents --cwd "$PWD" --model MODEL --executable /absolute/path/to/claude --json`,
+perch start claude --native --pane tern --workspace work --tab agents --cwd "$PWD" --model MODEL --executable /absolute/path/to/claude --json
+perch start agy --cwd "$PWD" --json
+perch start agy 'Hello' --native --pane right`,
     },
     zh: {
       purpose: '新建托管会话，或启动原生 TUI。',
@@ -124,7 +139,10 @@ perch start claude --native --pane tern --workspace work --tab agents --cwd "$PW
 --model 指定模型。--executable 仅用于 Claude，启动 Claude 时必填，
 须提供可信的原生 Claude 可执行文件的绝对路径。
 OMP 托管和原生启动均支持 --model 模型名[:思考等级]。省略后缀时使用 OMP 默认等级。
-提供方参数放到 -- 之后。原生模式逐项原样传递；托管 OMP 接受 -e/--extension 和 --thinking，其他托管模式不接受附加参数。
+提供方参数放在 -- 之后，agy 不接受附加参数。原生 OMP、Codex 和 Claude 原样传递；
+托管模式只有 OMP 接受附加参数（-e/--extension 和 --thinking）。
+托管 agy 新建私有 ACP 会话。如需认证，请先在 agy 中另行登录。
+指定 --model 时，该模型必须由 agy 提供；Perch 不会退回默认模型。
 不使用 --native 时新建托管会话，不发送提示词；请用 send 发送消息。
 省略 --pane 时不打开查看器；--pane right 在当前终端窗格中分屏打开查看器。
 --pane tern --workspace NAME --tab NAME 在指定 Tern 工作区和标签页打开查看器；
@@ -136,8 +154,9 @@ OMP 托管和原生启动均支持 --model 模型名[:思考等级]。省略后�
 请求窗格时还返回 pane: {backend, id}。
 --native 必须显式指定 --pane right、tern、herdr 或 tmux，启动提供方的真实 TUI，
 而不是托管会话或查看器。两种模式的具名后端使用相同的工作区、标签页要求和放置规则。
-可选的初始提示词须为单个非空位置参数，
-启动时传给提供方；省略时不带初始提示词。--json 仅返回
+可选的初始提示词须为单个非空位置参数，省略时不带初始提示词。
+原生 agy 使用 --prompt-interactive 传入提示词，不接受以 - 开头的位置参数。
+--json 仅返回
 {provider, mode: "native", pane: {backend, id}}；pane.id 不是聊天会话 ID。
 原生模式没有独立的 Perch 桥接进程或守护进程：终端后端持有 PTY
 并管理程序生命周期。断开终端与关闭实际窗格不同，关闭窗格会结束程序。
@@ -152,18 +171,25 @@ perch start omp --native --pane tmux --workspace work --tab agents
 perch start omp "你好" --pane right --native
 perch start omp --native --pane right --cwd "$PWD" --model MODEL --json
 perch start codex --native --pane right --cwd "$PWD" --model MODEL --json
-perch start claude --native --pane tern --workspace work --tab agents --cwd "$PWD" --model MODEL --executable /absolute/path/to/claude --json`,
+perch start claude --native --pane tern --workspace work --tab agents --cwd "$PWD" --model MODEL --executable /absolute/path/to/claude --json
+perch start agy --cwd "$PWD" --json
+perch start agy '你好' --native --pane right`,
     },
   },
   resume: {
     en: {
-      purpose: 'Open a saved managed OMP conversation, or reuse its running session.',
-      details: 'Pass the same stable ID returned by start or list. No prompt is sent and interrupted work is not restarted. A process-only ID is not resumable.',
+      purpose: 'Reopen a managed OMP or agy conversation, or reuse its running session.',
+      details: `Pass the same stable ID returned by start or list. No prompt is sent and
+interrupted work is not restarted. For agy, only conversations created by Perch
+are eligible, and the provider must support loading them. To read a closed agy
+conversation, resume it first. Native and process-only IDs cannot be resumed.`,
       examples: 'perch resume "$id" --json',
     },
     zh: {
-      purpose: '重新打开已保存的 OMP 托管对话；如果还在运行，直接复用。',
-      details: '使用 start 或 list 返回的同一个稳定 ID。不会发送消息，也不会重做中断的任务。只有进程号的记录不能恢复。',
+      purpose: '重新打开 OMP 或 agy 托管对话；如果仍在运行，则直接复用。',
+      details: `使用 start 或 list 返回的同一个稳定 ID。不会发送消息或重做中断的任务。
+agy 只允许恢复 Perch 创建的对话，并要求提供方支持加载。要读取已关闭的 agy
+对话，请先 resume。原生对话 ID 和只有进程号的 ID 不能恢复。`,
       examples: 'perch resume "$id" --json',
     },
   },
@@ -181,7 +207,7 @@ For managed OMP, slash-leading prompts are forwarded unchanged, including
 /skill: prompts after the first turn. Execution depends on OMP RPC support and
 may differ from its TUI. A session identity change invalidates the handle; use
 list to obtain the current ID. Submission does not wait for a reply or approve
-permission requests.`,
+permission requests. Native agy sessions do not support send.`,
       examples: `# Set id to an existing session ID from list or start first.
 printf '%s\\n' 'Summarize the current work' | perch send "$id" --stdin
 perch send "$id" '/skill:example'`,
@@ -195,7 +221,7 @@ send 使用提供方的消息投递通道，不根据文本推断意图，也不
 结果未知时先检查会话，不要自动重试。
 托管 OMP 的斜杠开头提示词原样转发，包括第一轮之后的 /skill: 提示词。
 能否执行取决于 OMP RPC 支持，可能与 TUI 不同。会话身份变化会使句柄失效，
-请通过 list 获取当前 ID。投递不等待回复，也不会批准权限请求。`,
+请通过 list 获取当前 ID。投递不等待回复，也不会批准权限请求。原生 agy 会话不支持 send。`,
       examples: `# 先将 id 设为 list 或 start 返回的已有会话 ID。
 printf '%s\\n' '总结当前工作' | perch send "$id" --stdin
 perch send "$id" '/skill:example'`,
@@ -215,6 +241,8 @@ Input is only for native OMP sessions with the rich extension on Tern or tmux,
 using a full session ID and an exact live session-identity handshake. Managed
 sessions and read-only viewers are unsupported. If there is no exact foreground
 process match, no input is sent.
+Native agy does not support text, --enter or named keys: its status line cannot
+verify editor focus or exclude a permission prompt. Use the original terminal.
 --json reports accepted: true, false, or null (delivery unknown). True means terminal
 delivery only, not that the application acted on it; partial delivery or a transport
 failure after writing can yield null. False and unknown exit nonzero. If delivery is
@@ -235,6 +263,7 @@ perch input "$id" --key Ctrl+Q`,
 /vibe 会切换模式，再执行一次会切换回来。
 输入仅支持 Tern 或 tmux 中加载完整扩展的原生 OMP 会话，须使用完整会话 ID 和精确的实时
 会话身份握手；不支持托管会话或只读查看器。若前台进程没有精确匹配，不会发送输入。
+agy 状态行无法确认编辑器焦点或排除权限弹窗。原生 agy 不支持文本、--enter 或具名按键，请使用原终端。
 --json 返回 accepted：true、false 或 null（投递结果未知）。true 只表示终端已接收，
 不表示应用已执行；部分投递或写入后的传输失败可能返回 null。false 和 null 均以非零状态退出。
 结果未知时先检查会话，不要自动重试。`,
@@ -250,7 +279,8 @@ perch input "$id" --key Ctrl+Q`,
       purpose: 'Read the chat messages currently visible for a session.',
       details: `By default the last 20 messages are shown in chronological order.
 --limit N selects a positive number of messages; --all reads all available
-messages. These options are mutually exclusive. --json emits structured messages.`,
+messages. These options are mutually exclusive. --json emits structured messages.
+Native agy history is unavailable: Perch cannot verify the current transcript.`,
       examples: `# Set id to an existing session ID from list or start first.
 perch history "$id" --limit 2`,
     },
@@ -258,7 +288,7 @@ perch history "$id" --limit 2`,
       purpose: '读取会话当前可见的聊天消息。',
       details: `默认按时间顺序显示最近 20 条消息。
 --limit N 指定消息条数（正整数）；--all 读取全部可用消息，两者不能同时使用。
---json 输出结构化消息。`,
+--json 输出结构化消息。Perch 无法验证原生 agy TUI 的当前会话记录，因此不读取其历史。`,
       examples: `# 先将 id 设为 list 或 start 返回的已有会话 ID。
 perch history "$id" --limit 2`,
     },
@@ -318,14 +348,16 @@ perch close "$id"`,
   },
   integration: {
     en: {
-      purpose: 'Manage integrations; currently only installing the OMP extension is supported.',
-      details: 'The install omp action installs the extension for the active OMP profile. --json returns the result and path.',
-      examples: 'perch integration install omp --json',
+      purpose: 'Set up local provider integrations.',
+      details: `install omp installs the extension for the active OMP profile.
+agy-statusline is a callback for the native agy status line; it does not change settings.`,
+      examples: 'perch integration install omp --json\nperch help integration agy-statusline',
     },
     zh: {
-      purpose: '管理集成；目前仅支持安装 OMP 扩展。',
-      details: 'install omp 操作为当前 OMP profile 安装扩展。--json 返回结果和安装路径。',
-      examples: 'perch integration install omp --json',
+      purpose: '使用本地提供方集成。',
+      details: `install omp 为当前 OMP profile 安装扩展。
+agy-statusline 是原生 agy 状态行的回调，不修改设置。`,
+      examples: 'perch integration install omp --json\nperch help integration agy-statusline',
     },
   },
   'integration install': {
@@ -355,6 +387,33 @@ are not overwritten; restart a running OMP TUI to load the extension.
       examples: 'perch integration install omp --json',
     },
   },
+  'integration agy-statusline': {
+    en: {
+      purpose: 'Verify a conversation report from the native agy status line.',
+      details: `Conversation identification is supported on macOS with agy 1.5.16 only.
+In the target agy TUI, enter this exact recipe, including && :, with a
+trusted Perch executable. You may use its single-quoted absolute path instead
+of perch. The suffix preserves the shell needed to verify the report's source.
+This changes and saves the agy status line setting; save any previous command
+so you can restore it. Perch does not change settings itself.
+The callback expects piped JSON and must be able to inspect its process ancestry.
+Without a verified report during the query, including when a sandbox blocks
+the check or the TUI is idle, list shows only a process clue. This does not
+enable history, view, send, input, wait or close.`,
+      examples: '/statusline perch integration agy-statusline && :\nperch list --provider agy --json',
+    },
+    zh: {
+      purpose: '验证原生 agy 状态行报告的当前对话身份。',
+      details: `当前仅支持在 macOS 的 agy 1.5.16 中通过状态行识别对话。
+请在目标 agy TUI 中按示例执行命令，保留 && :。使用可信的 Perch 可执行文件，
+也可用单引号括住的绝对路径替代 perch。后缀会保留用于核实报告来源的 shell。
+该命令会修改并保存 agy 状态行设置；如有原命令请先保留，以便还原。Perch 不会代改设置。
+回调从管道读取 JSON，且必须能检查进程的父子关系。如果沙箱阻止检查、TUI 闲置，
+或因其他原因导致查询期间没有可验证的新报告，list 只显示进程线索。
+此集成不会开启 history、view、send、input、wait 或 close。`,
+      examples: '/statusline perch integration agy-statusline && :\nperch list --provider agy --json',
+    },
+  },
   help: {
     en: {
       purpose: 'Show the overview or help for a command without executing it.',
@@ -369,14 +428,17 @@ are not overwritten; restart a running OMP TUI to load the extension.
   },
 };
 
-const syntaxKey = command => command.startsWith('integration') ? 'integration' : command;
-const lines = command => syntax[syntaxKey(command)].map(line => `  ${line}`).join('\n');
+const lines = command => {
+  const entries = command === 'integration agy-statusline' ? [syntax.integration[1]]
+    : command.startsWith('integration install') ? [syntax.integration[0]] : syntax[command];
+  return entries.map(line => `  ${line}`).join('\n');
+};
 
 export function overview(lang) {
   const zh = lang === 'zh';
   return `${zh ? '用法：' : 'Usage:'}\n${Object.keys(syntax).map(lines).join('\n')}
 
-${zh ? '管理本机 OMP、Codex 和 Claude 会话。' : 'Manage local OMP, Codex, and Claude sessions.'}
+${zh ? '管理本机 OMP、Codex、Claude 和 Antigravity CLI（agy）会话。' : 'Manage local OMP, Codex, Claude, and Antigravity CLI (agy) sessions.'}
 ${zh ? '使用 perch help <command> 或在命令后添加 --help 查看详细帮助。' : 'Use perch help <command> or add --help after a command for details.'}`;
 }
 

@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 const cli = fileURLToPath(new URL('../cli.mjs', import.meta.url));
 const id = 'omp:123:00000000000000000000000000000000';
+const agyManaged = 'agy:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const agyNative = 'agy:native-fixture-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const agyProcess = 'agy:pid-357';
 
 // Substitute the provider and terminal transport, so these CLI tests never inspect
 // or send input to a user's running sessions.
@@ -32,6 +35,29 @@ function fixture(t) {
       if (process.env.SEND_UNKNOWN) { const e = Error('unknown'); e.deliveryUnknown = true; throw e; }
     }
   `;
+  const agy = `
+    import { appendFileSync } from 'node:fs';
+    const record = value => appendFileSync(process.env.CALL_LOG, JSON.stringify(value) + '\\n');
+    const [managed, native, processHint] = ${JSON.stringify([agyManaged, agyNative, agyProcess])};
+    function row(id) {
+      const mode = id === managed ? 'managed' : id === native ? 'native' : 'process';
+      return { id, provider: 'agy', _agy: mode, _fixture: 'hidden-value',
+        pid: mode === 'process' ? 357 : 123, kind: mode === 'process' ? 'process' : 'session',
+        status: mode === 'process' ? 'unknown' : 'idle', title: null, cwd: null,
+        send: mode === 'managed', wait: mode === 'managed', close: mode === 'managed', history: mode === 'managed',
+        historyMode: mode === 'managed' ? 'live' : undefined };
+    }
+    export async function list() { record(['agy:list']); return [managed, native, processHint].map(row); }
+    export async function lookupBridge(id) { record(['agy:bridge', id]); return id === managed ? row(id) : null; }
+    export async function lookupNative(id) { record(['agy:native', id]); return [native, processHint].includes(id) ? row(id) : null; }
+    export async function send(session, text) { record(['agy:send', session.id, text]); }
+    export async function history(session) { record(['agy:history', session.id]); }
+    export async function confirmNativeTui(session, action) {
+      record(['agy:confirm', session.id, action]);
+      throw Error('AGY native input is unavailable: the status line does not prove the editor can accept input safely');
+    }
+    export async function recordNativeStatus(report) { record(['agy:status', report]); return 'AGY fixture'; }
+  `;
   const terminal = `
     import { appendFileSync } from 'node:fs';
     export { supportedTerminalKeys } from ${JSON.stringify(new URL('../terminal-input.mjs', import.meta.url).href)};
@@ -44,6 +70,7 @@ function fixture(t) {
   writeFileSync(loader, `
     const modules = {
       './adapters/omp.mjs': ${JSON.stringify(adapter)},
+      './adapters/agy.mjs': ${JSON.stringify(agy)},
       './terminal-input.mjs': ${JSON.stringify(terminal)},
     };
     export async function resolve(specifier, context, nextResolve) {
@@ -160,4 +187,80 @@ test('delivery uncertainty and invalid language preserve JSON outcomes for both 
     assert.notEqual(result.status, 0);
     assert.deepEqual(JSON.parse(result.stdout), { accepted: false });
   }
+});
+
+test('AGY CLI publishes managed, native, and process capabilities without internal identity fields', t => {
+  const f = fixture(t);
+  const result = f.run(['list', '--provider', 'agy', '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  const capabilities = Object.fromEntries(JSON.parse(result.stdout).map(
+    ({ id, kind, status, send, history, wait, close, historyMode }) => [id, [kind, status, send, history, wait, close, historyMode]],
+  ));
+  assert.deepEqual(capabilities, {
+    [agyManaged]: ['session', 'idle', true, true, true, true, 'live'],
+    [agyNative]: ['session', 'idle', false, false, false, false, undefined],
+    [agyProcess]: ['process', 'unknown', false, false, false, false, undefined],
+  });
+  assert.doesNotMatch(result.stdout, /_agy|hidden-value/);
+  const history = f.run(['history', agyNative, '--limit', '1', '--json']);
+  assert.equal(history.status, 1);
+  assert.match(history.stderr, /history unavailable/i);
+  assert.equal(f.run(['view', agyNative]).status, 1);
+  assert.deepEqual(f.calls(), [['agy:list'], ['agy:native', agyNative], ['agy:native', agyNative]]);
+});
+
+test('AGY CLI sends only to its managed message transport and never falls back to terminal keys', t => {
+  const f = fixture(t);
+  const message = '/statusline\nliteral text';
+  const managed = f.run(['send', agyManaged, '--stdin', '--json'], {}, message);
+  assert.equal(managed.status, 0, managed.stderr);
+  assert.deepEqual(JSON.parse(managed.stdout), { accepted: true });
+  for (const id of [agyNative, agyProcess]) {
+    const native = f.run(['send', id, '/statusline', '--json']);
+    assert.equal(native.status, 1);
+    assert.deepEqual(JSON.parse(native.stdout), { accepted: false });
+  }
+  for (const command of ['wait', 'close']) assert.equal(f.run([command, agyNative, '--json']).status, 1);
+  assert.deepEqual(f.calls(), [['agy:bridge', agyManaged], ['agy:send', agyManaged, message],
+    ['agy:native', agyNative], ['agy:native', agyProcess], ['agy:native', agyNative], ['agy:native', agyNative]]);
+});
+
+test('AGY CLI passes every native input form through the safety gate before any possible terminal effect', t => {
+  const f = fixture(t);
+  const managed = f.run(['input', agyManaged, 'text', '--json']);
+  assert.equal(managed.status, 1);
+  assert.deepEqual(JSON.parse(managed.stdout), { accepted: false });
+  assert.match(managed.stderr, /managed AGY sessions.*use send/i);
+  assert.deepEqual(f.calls(), [['agy:bridge', agyManaged]]);
+  for (const [id, args, action] of [
+    [agyNative, ['text'], { mode: 'text', text: 'text', enter: false }],
+    [agyNative, ['text', '--enter'], { mode: 'text', text: 'text', enter: true }],
+    [agyNative, ['--key', 'Enter'], { mode: 'key', text: 'Enter', enter: false }],
+    [agyNative, ['--key', 'Escape'], { mode: 'key', text: 'Escape', enter: false }],
+    [agyProcess, ['text'], { mode: 'text', text: 'text', enter: false }],
+  ]) {
+    const result = f.run(['input', id, ...args, '--json']);
+    assert.equal(result.status, 1);
+    assert.deepEqual(JSON.parse(result.stdout), { accepted: false });
+    assert.deepEqual(f.calls().slice(-2), [['agy:native', id], ['agy:confirm', id, action]]);
+  }
+  assert.ok(f.calls().every(([op]) => op !== 'terminal' && op !== 'agy:send' && op !== 'agy:list'));
+});
+
+test('AGY status line accepts only a bounded piped JSON object and clears invalid reports without reflecting payloads', t => {
+  const f = fixture(t);
+  const args = ['integration', 'agy-statusline'];
+  const report = { conversation_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', agent_state: 'idle' };
+  const valid = f.run(args, {}, JSON.stringify(report));
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.equal(valid.stdout, 'AGY fixture\n');
+  assert.deepEqual(f.calls(), [['agy:status', report]]);
+  const marker = 'fixture-statusline-private';
+  for (const text of [`{${marker}`, JSON.stringify([marker]), JSON.stringify({ title: marker.repeat(4096) })]) {
+    const rejected = f.run(args, {}, text);
+    assert.equal(rejected.status, 1);
+    assert.doesNotMatch(rejected.stdout + rejected.stderr, /fixture-statusline-private/);
+    assert.deepEqual(f.calls().at(-1), ['agy:status', null]);
+  }
+  assert.equal(f.calls().length, 4);
 });

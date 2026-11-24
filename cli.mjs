@@ -13,7 +13,7 @@ import { followConversation } from './view.mjs';
 import { sendTerminalInput, supportedTerminalKeys } from './terminal-input.mjs';
 import { cliInvocation, embeddedOmpExtension, getVersion, repository, kind, entry } from './portable-runtime.mjs';
 
-const providers = ['omp', 'codex', 'claude'];
+const providers = ['omp', 'codex', 'claude', 'agy'];
 const labels = {
   session: '会话', process: '进程', yes: '是', no: '否', live: '实时', persisted: '已保存',
   user: '用户', assistant: '助手', system: '系统', tool: '工具', developer: '开发者',
@@ -28,7 +28,7 @@ const style = (text, code, stream = process.stdout) =>
   stream.isTTY && !Object.hasOwn(process.env, 'NO_COLOR') && process.env.TERM !== 'dumb' && !process.argv.slice(2).includes('--json')
     ? `\x1b[${code}m${text}\x1b[0m` : text;
 function highlightHelp(help) {
-  const token = /(\bperch\s+)(integration(?:\s+install(?:\s+omp)?)?|list|start|send|input|wait|history|view|close|version|update|help)\b|(?<![\w-])--[\w-]+|(?<![\w-])-[a-zA-Z](?![\w-])|<[^<>\n]+>|\b(?:idle|running|blocked|failed|stopped|unknown)\b/g;
+  const token = /(\bperch\s+)(integration(?:\s+(?:install(?:\s+omp)?|agy-statusline))?|list|start|send|input|wait|history|view|close|version|update|help)\b|(?<![\w-])--[\w-]+|(?<![\w-])-[a-zA-Z](?![\w-])|<[^<>\n]+>|\b(?:idle|running|blocked|failed|stopped|unknown)\b/g;
   return help.split('\n').map(line => {
     if (/^\s*(?:Usage:|用法：|Examples:|示例：)\s*$/.test(line)) return style(line, 1);
     return line.replace(token, (match, prefix, command) => {
@@ -73,6 +73,7 @@ async function adapter(name) {
   if (!providers.includes(name)) throw Error(tr(`Unknown provider: ${quote(name)}`, `未知提供方：${quote(name)}`));
   if (name === 'omp') return import('./adapters/omp.mjs');
   if (name === 'codex') return import('./adapters/codex.mjs');
+  if (name === 'agy') return import('./adapters/agy.mjs');
   return import('./adapters/claude.mjs');
 }
 
@@ -114,6 +115,7 @@ async function resolveExecutable(name) {
 }
 
 function nativeEnvironment(provider) {
+  if (provider === 'agy') return [`HOME=${resolve(homedir())}`];
   const names = provider === 'codex' ? ['CODEX_HOME']
     : provider === 'claude' ? ['CLAUDE_CONFIG_DIR']
       : ['OMP_PROFILE', 'PI_PROFILE', 'PI_CONFIG_DIR', 'PI_CODING_AGENT_DIR', 'XDG_STATE_HOME'];
@@ -134,7 +136,11 @@ async function launchPane(values, session, provider, cwd, nativeExecutable, init
     args.push('--cwd', cwd, '--', '/usr/bin/env', ...nativeEnvironment(provider), nativeExecutable);
     if (values.model !== undefined) args.push('--model', values.model);
     args.push(...providerArgs);
-    if (initialPrompt !== undefined) args.push('--', initialPrompt);
+    if (initialPrompt !== undefined) {
+      // agy 的交互提示词是一个选项值，不是任意位置参数或独立开关。
+      if (provider === 'agy') args.push(`--prompt-interactive=${initialPrompt}`);
+      else args.push('--', initialPrompt);
+    }
   } else {
     args.push('--wait-output', '[as-ready]', '--');
     const environment = provider === 'codex'
@@ -142,7 +148,10 @@ async function launchPane(values, session, provider, cwd, nativeExecutable, init
       : provider === 'omp'
         ? [...(process.env.XDG_STATE_HOME ? [`XDG_STATE_HOME=${resolve(cwd, process.env.XDG_STATE_HOME)}`] : ['-u', 'XDG_STATE_HOME']),
             `PI_CODING_AGENT_DIR=${resolve(cwd, process.env.PI_CODING_AGENT_DIR || join(homedir(), '.omp/agent'))}`]
-        : [`CLAUDE_CONFIG_DIR=${resolve(cwd, process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'))}`];
+        : provider === 'agy'
+          ? [...(process.env.XDG_STATE_HOME ? [`XDG_STATE_HOME=${resolve(process.env.XDG_STATE_HOME)}`] : ['-u', 'XDG_STATE_HOME']),
+              `HOME=${resolve(homedir())}`]
+          : [`CLAUDE_CONFIG_DIR=${resolve(cwd, process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'))}`];
     args.push('/usr/bin/env', ...environment, ...cliInvocation(), 'view', session.id, '--lang', lang);
   }
   let stdout;
@@ -162,17 +171,21 @@ function publicSession({ id, provider, kind = 'session', pid, cwd, title, status
   return { id, provider, kind, pid, cwd, title: typeof title === 'string' && title.trim() ? title : null, status: typeof status === 'string' && Object.hasOwn(sessionStatus, status) ? status : 'unknown', send, history, wait, close, sendReason, historyReason, historyMode };
 }
 
+async function readStdin(limit, tooLarge) {
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of process.stdin) {
+    bytes += chunk.length;
+    if (bytes > limit) throw Error(tooLarge);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, bytes);
+}
+
 async function promptText(value, stdin) {
   if (stdin) {
     if (process.stdin.isTTY) throw Error(tr('--stdin expects piped or redirected text', '--stdin 需要管道或重定向输入'));
-    const chunks = [];
-    let bytes = 0;
-    for await (const chunk of process.stdin) {
-      bytes += chunk.length;
-      if (bytes > 1024 * 1024) throw Error(tr('Message exceeds 1 MiB', '消息超过 1 MiB'));
-      chunks.push(chunk);
-    }
-    value = Buffer.concat(chunks, bytes).toString('utf8');
+    value = (await readStdin(1024 * 1024, tr('Message exceeds 1 MiB', '消息超过 1 MiB'))).toString('utf8');
   }
   if (value !== undefined && !value.trim()) throw Error(tr('Message must not be empty', '消息不能为空'));
   return value;
@@ -275,6 +288,24 @@ async function run([command, ...args]) {
     return console.log(`${message}: ${quote(result.current)} → ${quote(result.latest)}`);
   }
   if (command === 'integration') {
+    if (positionals[0] === 'agy-statusline') {
+      if (positionals.length !== 1 || values.json || boundary !== -1) throw Error(commandHelp('integration agy-statusline', lang));
+      if (process.stdin.isTTY) throw Error(tr('AGY status line expects JSON on piped stdin', 'AGY 状态行需要从管道读取 JSON'));
+      const api = await adapter('agy');
+      let input;
+      try {
+        const bytes = await readStdin(64 * 1024, tr('AGY status line report exceeds 64 KiB', 'AGY 状态行报告超过 64 KiB'));
+        try { input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch {}
+        if (!input || typeof input !== 'object' || Array.isArray(input)) {
+          throw Error(tr('Invalid AGY status line JSON', 'AGY 状态行 JSON 无效'));
+        }
+      } catch (error) {
+        // 只有来自真实 agy 状态行的回调才会清除旧绑定；错误不输出原始报告。
+        try { await api.recordNativeStatus(null); } catch {}
+        throw error;
+      }
+      return console.log(quote(diagnostic(await api.recordNativeStatus(input))));
+    }
     if (positionals.length !== 2 || positionals[0] !== 'install' || positionals[1] !== 'omp') {
       const topic = positionals[0] === 'install'
         ? positionals[1] === 'omp' ? 'integration install omp' : 'integration install'
@@ -326,6 +357,8 @@ async function run([command, ...args]) {
     if (argument !== undefined && !argument.trim()) throw Error(tr('Message must not be empty', '消息不能为空'));
     if (values.executable !== undefined && id !== 'claude') throw Error(tr('--executable is only for Claude', '--executable 仅用于 Claude'));
     const providerArgs = boundary === -1 ? [] : args.slice(boundary + 1);
+    if (id === 'agy' && providerArgs.length) throw Error('Raw arguments are not supported for agy');
+    if (id === 'agy' && argument?.includes('\0')) throw Error(tr('AGY native startup prompts must not contain NUL', 'AGY 原生启动提示词不能包含空字符'));
     if (!values.native && providerArgs.length && id !== 'omp') throw Error(tr('Raw arguments for this provider require --native', '此提供方仅在 --native 模式下支持原始参数'));
     validatePaneOptions(values);
     const api = await adapter(id);
@@ -392,17 +425,21 @@ async function run([command, ...args]) {
       text = argument;
     }
   }
-  const api = await adapter(id.split(':', 1)[0]);
+  const provider = id.split(':', 1)[0];
+  const api = await adapter(provider);
   if (command === 'resume') {
-    if (!api.resume) throw Error(tr('resume currently supports OMP only', 'resume 目前只支持 OMP'));
+    if (!api.resume) throw Error(tr('resume supports managed OMP and AGY sessions only', 'resume 只支持 OMP 和 agy 托管会话'));
     const session = await api.resume(id);
     return values.json ? json({ id: session.id, provider: session.provider }) : console.log(`${style(tr('Available', '会话可用'), 32)}: ${style(quote(session.id), 36)}`);
   }
-  const direct = await api.lookupBridge?.(id);
-  const matches = direct ? [direct] : (await api.list()).filter(s => s.id === id);
-  if (!matches.length && (command === 'history' || command === 'send')) {
+  const nativeAgy = provider === 'agy' && /^agy:(?:native|pid)-/.test(id);
+  const direct = nativeAgy ? await api.lookupNative(id) : await api.lookupBridge?.(id);
+  // agy 的已知句柄只查对应桥接或原生进程；旧句柄失效时不扫描其他对话。
+  const matches = direct ? [direct] : provider === 'agy' ? [] : (await api.list()).filter(s => s.id === id);
+  const savedLookup = command === 'history' || command === 'send' || (provider === 'agy' && command === 'view');
+  if (!matches.length && !nativeAgy && savedLookup) {
     const saved = await api.savedSession?.(id);
-    if (saved && command === 'send') throw Error(tr(`Session is closed; run perch resume ${quote(id)} first`, `会话已关闭，请先执行 perch resume ${quote(id)}`));
+    if (saved && (command === 'send' || provider === 'agy')) throw Error(tr(`Session is closed; run perch resume ${quote(id)} first`, `会话已关闭，请先执行 perch resume ${quote(id)}`));
     if (saved) matches.push(saved);
   }
   if (matches.length !== 1) throw Error(matches.length ? tr(`Ambiguous session: ${quote(id)}`, `会话不唯一：${quote(id)}`) : tr(`Session no longer listed: ${quote(id)}`, `会话已不在列表中：${quote(id)}`));
@@ -417,20 +454,27 @@ async function run([command, ...args]) {
     return await followConversation({ read: () => api.history(session, 20), id: session.id, title: session.title, lang, style, quote, multiline });
   }
   if (command === 'input') {
-    if (session.provider !== 'omp' || typeof api.confirmNativeTui !== 'function') {
-      throw Error(tr('input requires a live native OMP TUI session with the local extension', 'input 需要启用本地扩展的活动 OMP 原生 TUI 会话'));
-    }
-    const confirm = async () => {
-      let info;
-      try { info = await api.confirmNativeTui(session); }
-      catch { throw Error(tr('Native OMP TUI identity could not be confirmed', '无法确认原生 OMP TUI 会话身份')); }
-      if (values.enter && ['running', 'blocked'].includes(info.status)) {
-        throw Error(tr('input --enter is unavailable while the OMP session is busy or blocked', 'OMP 会话忙碌或阻塞时不能使用 input --enter'));
+    const action = { mode: values.key === undefined ? 'text' : 'key', text, enter: !!values.enter };
+    let confirm;
+    if (session.provider === 'agy') {
+      if (session._agy === 'managed') throw Error(tr('input is not available for managed AGY sessions; use send', 'AGY 托管会话不支持 input，请使用 send'));
+      confirm = () => api.confirmNativeTui(session, action);
+    } else {
+      if (session.provider !== 'omp' || typeof api.confirmNativeTui !== 'function') {
+        throw Error(tr('input requires a live native OMP TUI session with the local extension', 'input 需要启用本地扩展的活动 OMP 原生 TUI 会话'));
       }
-    };
+      confirm = async () => {
+        let info;
+        try { info = await api.confirmNativeTui(session); }
+        catch { throw Error(tr('Native OMP TUI identity could not be confirmed', '无法确认原生 OMP TUI 会话身份')); }
+        if (values.enter && ['running', 'blocked'].includes(info.status)) {
+          throw Error(tr('input --enter is unavailable while the OMP session is busy or blocked', 'OMP 会话忙碌或阻塞时不能使用 input --enter'));
+        }
+      };
+    }
     await confirm();
     deliveryAttempted = true;
-    await sendTerminalInput({ pid: session.pid, mode: values.key === undefined ? 'text' : 'key', text, enter: !!values.enter, confirm, lang });
+    await sendTerminalInput({ pid: session.pid, ...action, confirm, lang });
     return values.json ? json({ accepted: true }) : console.log(style(tr('Terminal input delivered; command execution is not confirmed.', '终端输入已送达；不代表命令已执行。'), 32));
   }
   if (command === 'send') {

@@ -25,7 +25,7 @@ test('explicit language overrides the environment for help and invalid options',
 });
 
 test('each command has local usage and examples, including nested integration help', () => {
-  for (const topic of ['list', 'start', 'resume', 'send', 'input', 'history', 'view', 'wait', 'close', 'integration', 'integration install', 'integration install omp']) {
+  for (const topic of ['list', 'start', 'resume', 'send', 'input', 'history', 'view', 'wait', 'close', 'integration', 'integration install', 'integration install omp', 'integration agy-statusline']) {
     for (const [lang, heading] of [['en', 'Examples:'], ['zh', '示例：']]) {
       const result = spawnSync(process.execPath, [cli, ...topic.split(' '), '--help', '--lang', lang], { encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);
@@ -34,6 +34,14 @@ test('each command has local usage and examples, including nested integration he
       assert.ok(usage.includes(`perch ${topic}`), `${lang}: missing usage for ${topic}`);
       assert.ok(examples?.includes(`perch ${topic}`), `${lang}: missing example for ${topic}`);
       assert.ok(!usage.includes(`perch ${topic === 'start' ? 'history' : 'start'} <`), `${topic} printed the global command list`);
+      if (topic === 'resume') {
+        assert.match(result.stdout, lang === 'en' ? /only conversations created by Perch/ : /只允许恢复 Perch 创建的对话/);
+      }
+      if (topic === 'integration agy-statusline') {
+        assert.match(result.stdout, lang === 'en' ? /piped JSON/ : /从管道读取 JSON/);
+        assert.match(result.stdout, lang === 'en' ? /changes and saves the agy status line setting/ : /修改并保存 agy 状态行设置/);
+        assert.match(result.stdout, /\/statusline perch integration agy-statusline && :/);
+      }
     }
   }
 });
@@ -51,6 +59,8 @@ test('pane and viewer help describes the supported behavior in both languages', 
     assert.match(start.stdout, /perch start omp --native --pane tmux --workspace work --tab agents/);
     assert.match(start.stdout, /pane (?:is|为) null/);
     assert.match(start.stdout, /perch start <omp\|codex\|claude> \[prompt\] --native --pane right\|tern\|herdr\|tmux/);
+    assert.match(start.stdout, /perch start agy \[prompt\] --native --pane right\|tern\|herdr\|tmux/);
+    assert.match(start.stdout, /perch start agy --cwd "\$PWD" --json/);
     assert.match(start.stdout, /perch start omp --native --pane right --cwd "\$PWD" --model MODEL --json/);
     assert.match(start.stdout, /perch start codex --native --pane right --cwd "\$PWD" --model MODEL --json/);
     assert.match(start.stdout, /perch start claude --native --pane tern --workspace work --tab agents --cwd "\$PWD" --model MODEL --executable \/absolute\/path\/to\/claude --json/);
@@ -152,6 +162,7 @@ test('send and input help distinguish provider delivery from native terminal inp
         assert.match(input.stdout, /foreground\s+process match, no input is sent/);
         assert.match(input.stdout, /terminal\s+delivery only[\s\S]*partial delivery[\s\S]*null/);
         assert.match(input.stdout, /running or blocked/);
+        assert.match(input.stdout, /Native agy does not support text, --enter or named keys/);
       } else {
         assert.match(input.stdout, /perch input "\$id" '总结当前工作' --enter/);
         assert.match(input.stdout, /普通编辑器已就绪、输入为空且没有弹窗/);
@@ -162,6 +173,7 @@ test('send and input help distinguish provider delivery from native terminal inp
         assert.match(input.stdout, /前台进程没有精确匹配，不会发送输入/);
         assert.match(input.stdout, /终端已接收，\s*不表示应用已执行；部分投递[\s\S]*null/);
         assert.match(input.stdout, /running 或 blocked/);
+        assert.match(input.stdout, /原生 agy 不支持文本、--enter 或具名按键/);
       }
     }
   }

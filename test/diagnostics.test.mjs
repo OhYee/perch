@@ -81,3 +81,20 @@ test('diagnostics Claude bridge CLI uses system language for its own errors', ()
     assert.equal(result.stdout, '');
   }
 });
+
+test('diagnostics AGY keeps actionable managed and native outcomes localized', () => {
+  for (const [reason, zh] of [
+    ['Antigravity CLI authentication required; sign in to agy first', 'Antigravity CLI 需要认证；请先登录 agy'],
+    ['Antigravity CLI did not confirm the prompt; do not resend', 'Antigravity CLI 未确认收到消息；请勿重发'],
+    ['Antigravity CLI managed session already has an owner', 'Antigravity CLI 托管会话已有运行实例'],
+    ['Antigravity CLI managed session generation changed', 'Antigravity CLI 托管会话的运行实例已变更'],
+    ['Antigravity CLI does not support loading managed sessions', '当前 Antigravity CLI 不支持加载托管会话'],
+    ['Raw arguments are not supported for agy', 'agy 不接受原始提供方参数'],
+    ['AGY native input is unavailable: the status line does not prove the editor can accept input safely', '无法向 agy 原生会话输入：状态行无法确认编辑器能安全接收输入'],
+    ['AGY native session identity is unavailable; the current conversation could not be verified', '无法确认 agy 原生会话身份：无法验证当前对话'],
+    ['AGY status line callback refused: expected the fixed command in a live native TUI', 'agy 状态行回调已拒绝：需要由活动的原生 TUI 执行固定命令'],
+  ]) {
+    assert.equal(translateDiagnostic(reason, 'zh'), zh);
+    assert.equal(translateDiagnostic(reason, 'en'), reason);
+  }
+});
