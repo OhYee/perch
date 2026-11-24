@@ -37,12 +37,12 @@ export default function (pi: ExtensionAPI) {
     pause();
     await Promise.allSettled(admissions);
   }
-  pi.registerCommand('agent-session-reconnect', {
-    description: translateDiagnostic('Reconnect the local agent-session bridge after a cancelled session transition', systemLanguage()),
+  pi.registerCommand('perch-reconnect', {
+    description: translateDiagnostic('Reconnect the local Perch bridge after a cancelled session transition', systemLanguage()),
     handler: async (_args, ctx) => {
       if (stopping || !server?.listening || admissions.size) return;
       activate(ctx);
-      if (ctx.hasUI) ctx.ui.notify(translateDiagnostic('agent-session bridge reconnected', systemLanguage()), 'info');
+      if (ctx.hasUI) ctx.ui.notify(translateDiagnostic('Perch bridge reconnected', systemLanguage()), 'info');
     },
   });
 

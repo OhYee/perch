@@ -11,7 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const exec = promisify(execFile);
 const directory = `/tmp/agent-session-${process.getuid?.()}`;
-const unavailable = 'OMP session has not enabled the local agent-session extension';
+const unavailable = 'OMP session has not enabled the local Perch extension';
 const statuses = new Set(['idle', 'running', 'blocked', 'failed', 'stopped']);
 const status = value => statuses.has(value) ? value : 'unknown';
 
@@ -176,7 +176,9 @@ export async function resume(id) {
     for (;;) {
       try { lock.exec('BEGIN IMMEDIATE'); break; }
       catch (error) {
-        if (error.errcode !== 5 || Date.now() >= deadline) throw error;
+        const busy = error.errcode === 5 || (typeof error.errno === 'number' && (error.errno & 0xff) === 5) ||
+          (typeof error.code === 'string' && (error.code === 'SQLITE_BUSY' || error.code.startsWith('SQLITE_BUSY_')));
+        if (!busy || Date.now() >= deadline) throw error;
         await delay(100);
       }
     }
@@ -455,7 +457,7 @@ export async function waitIdle(session, timeoutMs) {
 }
 
 export async function close(session) {
-  if (!session?.close || typeof session._path !== 'string') throw new Error('OMP session is not managed by agent-session');
+  if (!session?.close || typeof session._path !== 'string') throw new Error('OMP session is not managed by Perch');
   await request(session._path, { op: 'close', id: runtimeId(session) });
 }
 

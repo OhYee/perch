@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { bridgeInvocation } from '../portable-runtime.mjs';
 
 // Only invoked by `start` with an adapter-owned module. The child reports its
 // identity over the inherited pipe, never via a title/PID search or a log.
 export function launchBridge(moduleURL, { cwd, env = process.env, args = [] }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [fileURLToPath(moduleURL), ...args], {
+    const [executable, ...entry] = bridgeInvocation(moduleURL);
+    const child = spawn(executable, [...entry, ...args], {
       cwd, env, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     });
     const timer = setTimeout(() => fail(new Error('Timed out starting agent')), 30000);

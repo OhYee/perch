@@ -12,7 +12,7 @@ const chinese = new Map(Object.entries({
   'Expected a value for the managed OMP argument': '托管 OMP 参数缺少有效的值',
   'OMP session does not support waiting': '此 OMP 会话不支持等待',
   'Invalid OMP wait response': 'OMP 返回了无效的等待结果',
-  'OMP session is not managed by agent-session': '此 OMP 会话不由 agent-session 托管',
+  'OMP session is not managed by Perch': '此 OMP 会话不由 Perch 托管',
   'Claude did not return a turn ID': 'Claude 未返回轮次 ID',
   'Claude session does not support waiting': '此 Claude 会话不支持等待',
   'Invalid Claude turn ID': 'Claude 轮次 ID 无效',
@@ -53,7 +53,7 @@ const chinese = new Map(Object.entries({
   'Codex managed socket directory is not private to the current user': 'Codex 托管套接字目录不是当前用户的私有目录',
   'Codex managed socket is not private to the current user': 'Codex 托管套接字不是当前用户专用',
   'Only managed Codex sessions can be closed': '只能关闭本工具托管的 Codex 会话',
-  'OMP session has not enabled the local agent-session extension': 'OMP 会话未启用本地 agent-session 扩展',
+  'OMP session has not enabled the local Perch extension': 'OMP 会话未启用本地 Perch 扩展',
   'Current session identity is unavailable; enable the local extension': '当前会话身份不可用；请启用本地扩展',
   'OMP delivery timed out; delivery status is unknown; do not retry automatically': 'OMP 发送超时；投递状态未知，请勿自动重试',
   'OMP local endpoint timed out': 'OMP 本地端点超时',
@@ -124,11 +124,17 @@ const chinese = new Map(Object.entries({
   'Claude returned an error result.': 'Claude 返回了错误结果。',
   'Claude bridge could not start.': 'Claude 桥接无法启动。',
   'Claude bridge session:': 'Claude 桥接会话：',
-  'Reconnect the local agent-session bridge after a cancelled session transition': '会话切换取消后重新连接本地 agent-session 桥接',
-  'agent-session bridge reconnected': 'agent-session 桥接已重新连接',
+  'Reconnect the local Perch bridge after a cancelled session transition': '会话切换取消后重新连接本地 Perch 桥接',
+  'Perch bridge reconnected': 'Perch 桥接已重新连接',
 }));
 
+const legacyDiagnostics = new Map([
+  ['OMP session is not managed by agent-session', 'OMP session is not managed by Perch'],
+  ['OMP session has not enabled the local agent-session extension', 'OMP session has not enabled the local Perch extension'],
+]);
+
 export function translateDiagnostic(message, lang) {
+  message = legacyDiagnostics.get(message) ?? message;
   if (lang !== 'zh') return message;
   const known = chinese.get(message);
   if (known !== undefined) return known;

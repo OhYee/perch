@@ -13,7 +13,7 @@ about: Report a reproducible problem
 
 ## Environment
 
-- agent-session version or commit:
+- Perch version or commit:
 - OS and Node.js version:
 - Provider and version, if relevant:
 

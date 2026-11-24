@@ -1,5 +1,5 @@
 {
-  "name": "agent-session",
+  "name": "perch",
   "version": "0.1.0",
   "private": true,
   "description": "Inspect and message live local coding-agent sessions",
@@ -10,6 +10,7 @@
     "help.mjs",
     "locale.mjs",
     "terminal-input.mjs",
+    "portable-runtime.mjs",
     "view.mjs",
     "omp-extension.ts",
     "adapters/",
@@ -20,7 +21,7 @@
   ],
   "type": "module",
   "bin": {
-    "agent-session": "./cli.mjs"
+    "perch": "./cli.mjs"
   },
   "engines": {
     "node": ">=22.13"

@@ -7,8 +7,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { assetFilename, validateVersion } from './release-intent.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
-const topLevel = ['cli.mjs', 'diagnostics.mjs', 'help.mjs', 'locale.mjs', 'terminal-input.mjs', 'view.mjs', 'omp-extension.ts'];
-const allowed = /^(?:package\.json|README\.md|LICENSE|SECURITY\.md|CONTRIBUTING\.md|AGENTS\.md|releases\/[A-Za-z0-9][A-Za-z0-9.+_-]*\.md|cli\.mjs|diagnostics\.mjs|help\.mjs|locale\.mjs|terminal-input\.mjs|view\.mjs|omp-extension\.ts|adapters\/[a-z0-9][a-z0-9-]*\.mjs)$/;
+const topLevel = ['cli.mjs', 'diagnostics.mjs', 'help.mjs', 'locale.mjs', 'terminal-input.mjs', 'portable-runtime.mjs', 'view.mjs', 'omp-extension.ts'];
+const allowed = /^(?:package\.json|README\.md|LICENSE|SECURITY\.md|CONTRIBUTING\.md|AGENTS\.md|releases\/[A-Za-z0-9][A-Za-z0-9.+_-]*\.md|cli\.mjs|diagnostics\.mjs|help\.mjs|locale\.mjs|terminal-input\.mjs|portable-runtime\.mjs|view\.mjs|omp-extension\.ts|adapters\/[a-z0-9][a-z0-9-]*\.mjs)$/;
 
 export function validatePackageEntries(entries, required) {
   if (!Array.isArray(entries) || entries.some(path => typeof path !== 'string' || path.includes('..') || !allowed.test(path))) throw Error('package contains an unexpected or unsafe file');
@@ -26,14 +26,14 @@ function main() {
   const output = resolve(process.argv[2]);
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   const version = validateVersion(pkg.version);
-  if (pkg.name !== 'agent-session' || pkg.private !== true) throw Error('expected the private agent-session package');
+  if (pkg.name !== 'perch' || pkg.private !== true) throw Error('expected the private perch package');
   const filename = assetFilename(version);
-  const npmFilename = `agent-session-${version}.tgz`;
+  const npmFilename = `perch-${version}.tgz`;
   const archive = join(output, filename);
   const npmArchive = join(output, npmFilename);
-  const checksum = join(output, 'SHA256SUMS.txt');
+  const receipt = join(output, `${filename}.sha256`);
   mkdirSync(output, { recursive: true });
-  if (existsSync(archive) || existsSync(npmArchive) || existsSync(checksum)) throw Error('output already contains a release asset');
+  if (existsSync(archive) || existsSync(npmArchive) || existsSync(receipt) || existsSync(join(output, 'SHA256SUMS.txt'))) throw Error('output already contains a release asset');
   const [packed] = JSON.parse(run('npm', ['pack', '--ignore-scripts', '--offline', '--json', '--pack-destination', output], { cwd: root }));
   if (packed.name !== pkg.name || packed.version !== version || packed.filename !== npmFilename) throw Error('npm pack returned an unexpected package');
   if (npmArchive !== archive) renameSync(npmArchive, archive);
@@ -49,15 +49,17 @@ function main() {
   validatePackageEntries(members, expected);
   if (members.length !== expected.length) throw Error('archive and npm pack file list differ');
 
-  const temp = mkdtempSync(join(tmpdir(), 'agent-session-package-'));
+  const temp = mkdtempSync(join(tmpdir(), 'perch-package-'));
   try {
     run('tar', ['-xzf', archive, '-C', temp]);
     const unpacked = join(temp, 'package');
     copyFileSync(join(root, 'package-lock.json'), join(unpacked, 'package-lock.json'));
     run('npm', ['ci', '--ignore-scripts', '--offline', '--no-audit', '--no-fund'], { cwd: unpacked });
     const env = { ...process.env, HOME: temp, PI_CODING_AGENT_DIR: join(temp, 'agent'), OMP_PROFILE: '', PI_PROFILE: '', LC_ALL: 'en_US.UTF-8' };
-    const cli = join(unpacked, 'cli.mjs');
-    if (!run(cli, ['--help', '--lang', 'en'], { env }).includes('agent-session')) throw Error('packaged CLI help smoke failed');
+    const prefix = join(temp, 'installed');
+    run('npm', ['install', '--global', '--install-links=false', '--offline', '--ignore-scripts', '--prefix', prefix, unpacked]);
+    const cli = join(prefix, 'bin', 'perch');
+    if (!run(cli, ['--help', '--lang', 'en'], { env }).includes('perch')) throw Error('packaged CLI help smoke failed');
     const installed = JSON.parse(run(cli, ['integration', 'install', 'omp', '--json', '--lang', 'en'], { env }));
     const extension = join(temp, 'agent', 'extensions', 'agent-session.ts');
     if (installed.status !== 'installed' || installed.path !== extension) throw Error('packaged integration install smoke failed');
@@ -65,10 +67,11 @@ function main() {
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
+  if (!readFileSync(archive).equals(data)) throw Error('package changed during smoke testing');
   const hash = createHash('sha256').update(data).digest('hex');
-  writeFileSync(checksum, `${hash}  ${filename}\n`, { flag: 'wx' });
-  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `archive=${archive}\n`);
-  console.log(`Prepared ${filename} and SHA256SUMS.txt`);
+  writeFileSync(receipt, `${hash}\n`, { flag: 'wx' });
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `archive=${archive}\nreceipt=${receipt}\n`);
+  console.log(`Prepared and smoke-tested ${filename}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

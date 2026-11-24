@@ -6,7 +6,7 @@ import { translateDiagnostic } from '../diagnostics.mjs';
 
 test('diagnostics non-Claude known adapter reasons and errors', () => {
   const cases = [
-    ['OMP session has not enabled the local agent-session extension', 'OMP 会话未启用本地 agent-session 扩展'],
+    ['OMP session has not enabled the local Perch extension', 'OMP 会话未启用本地 Perch 扩展'],
     ['Current session identity is unavailable; enable the local extension', '当前会话身份不可用；请启用本地扩展'],
     ['OMP delivery timed out; delivery status is unknown; do not retry automatically', 'OMP 发送超时；投递状态未知，请勿自动重试'],
     ['Invalid OMP journal entry', '无效的 OMP 日志记录'],
@@ -16,12 +16,22 @@ test('diagnostics non-Claude known adapter reasons and errors', () => {
     ['Codex app-server rejected the request', 'Codex app-server 拒绝了请求'],
     ['Invalid request', '无效的请求'],
     ['Request rejected', '请求被拒绝'],
-    ['Reconnect the local agent-session bridge after a cancelled session transition', '会话切换取消后重新连接本地 agent-session 桥接'],
-    ['agent-session bridge reconnected', 'agent-session 桥接已重新连接'],
+    ['Reconnect the local Perch bridge after a cancelled session transition', '会话切换取消后重新连接本地 Perch 桥接'],
+    ['Perch bridge reconnected', 'Perch 桥接已重新连接'],
   ];
   for (const [source, expected] of cases) {
     assert.equal(translateDiagnostic(source, 'zh'), expected);
     assert.equal(translateDiagnostic(source, 'en'), source);
+  }
+});
+
+test('legacy adapter diagnostics use Perch branding in both languages', () => {
+  for (const [legacy, en, zh] of [
+    ['OMP session is not managed by agent-session', 'OMP session is not managed by Perch', '此 OMP 会话不由 Perch 托管'],
+    ['OMP session has not enabled the local agent-session extension', 'OMP session has not enabled the local Perch extension', 'OMP 会话未启用本地 Perch 扩展'],
+  ]) {
+    assert.equal(translateDiagnostic(legacy, 'en'), en);
+    assert.equal(translateDiagnostic(legacy, 'zh'), zh);
   }
 });
 

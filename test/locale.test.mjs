@@ -29,10 +29,11 @@ test('each command has local usage and examples, including nested integration he
     for (const [lang, heading] of [['en', 'Examples:'], ['zh', '示例：']]) {
       const result = spawnSync(process.execPath, [cli, ...topic.split(' '), '--help', '--lang', lang], { encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);
+      assert.doesNotMatch(result.stdout, /agent-session/);
       const [usage, examples] = result.stdout.split(heading);
-      assert.ok(usage.includes(`agent-session ${topic}`), `${lang}: missing usage for ${topic}`);
-      assert.ok(examples?.includes(`agent-session ${topic}`), `${lang}: missing example for ${topic}`);
-      assert.ok(!usage.includes(`agent-session ${topic === 'start' ? 'history' : 'start'} <`), `${topic} printed the global command list`);
+      assert.ok(usage.includes(`perch ${topic}`), `${lang}: missing usage for ${topic}`);
+      assert.ok(examples?.includes(`perch ${topic}`), `${lang}: missing example for ${topic}`);
+      assert.ok(!usage.includes(`perch ${topic === 'start' ? 'history' : 'start'} <`), `${topic} printed the global command list`);
     }
   }
 });
@@ -44,15 +45,15 @@ test('pane and viewer help describes the supported behavior in both languages', 
     assert.equal(start.status, 0, start.stderr);
     assert.match(start.stdout, /--pane right/);
     assert.match(start.stdout, /--pane tern --workspace (?:NAME|work) --tab (?:NAME|agents)/);
-    assert.match(start.stdout, /agent-session start omp --pane right/);
-    assert.match(start.stdout, /agent-session start omp --pane tern --workspace work --tab agents/);
-    assert.match(start.stdout, /agent-session start omp --pane herdr --workspace work --tab agents/);
-    assert.match(start.stdout, /agent-session start omp --native --pane tmux --workspace work --tab agents/);
+    assert.match(start.stdout, /perch start omp --pane right/);
+    assert.match(start.stdout, /perch start omp --pane tern --workspace work --tab agents/);
+    assert.match(start.stdout, /perch start omp --pane herdr --workspace work --tab agents/);
+    assert.match(start.stdout, /perch start omp --native --pane tmux --workspace work --tab agents/);
     assert.match(start.stdout, /pane (?:is|为) null/);
-    assert.match(start.stdout, /agent-session start <omp\|codex\|claude> \[prompt\] --native --pane right\|tern\|herdr\|tmux/);
-    assert.match(start.stdout, /agent-session start omp --native --pane right --cwd "\$PWD" --model MODEL --json/);
-    assert.match(start.stdout, /agent-session start codex --native --pane right --cwd "\$PWD" --model MODEL --json/);
-    assert.match(start.stdout, /agent-session start claude --native --pane tern --workspace work --tab agents --cwd "\$PWD" --model MODEL --executable \/absolute\/path\/to\/claude --json/);
+    assert.match(start.stdout, /perch start <omp\|codex\|claude> \[prompt\] --native --pane right\|tern\|herdr\|tmux/);
+    assert.match(start.stdout, /perch start omp --native --pane right --cwd "\$PWD" --model MODEL --json/);
+    assert.match(start.stdout, /perch start codex --native --pane right --cwd "\$PWD" --model MODEL --json/);
+    assert.match(start.stdout, /perch start claude --native --pane tern --workspace work --tab agents --cwd "\$PWD" --model MODEL --executable \/absolute\/path\/to\/claude --json/);
     assert.match(start.stdout, /\{provider, mode: "native", pane: \{backend, id\}\}/);
     if (lang === 'en') {
       assert.match(start.stdout, /without sending a prompt/);
@@ -63,7 +64,7 @@ test('pane and viewer help describes the supported behavior in both languages', 
       assert.match(start.stdout, /--pane herdr and --pane tmux also require --workspace NAME and --tab NAME/);
       assert.match(start.stdout, /for tmux they are session and window names/);
       assert.match(start.stdout, /pane\.id is not a chat ID/);
-      assert.match(start.stdout, /no independent agent-session bridge or daemon/);
+      assert.match(start.stdout, /no independent Perch bridge or daemon/);
       assert.match(start.stdout, /Detaching is not the same as\s+closing the actual pane/);
       assert.match(start.stdout, /capabilities vary by provider and integration/);
     } else {
@@ -75,15 +76,15 @@ test('pane and viewer help describes the supported behavior in both languages', 
       assert.match(start.stdout, /--pane herdr 和 --pane tmux 同样必须指定 --workspace NAME 和 --tab NAME/);
       assert.match(start.stdout, /tmux 对应会话和窗口名称/);
       assert.match(start.stdout, /pane\.id 不是聊天会话 ID/);
-      assert.match(start.stdout, /没有独立的 agent-session 桥接进程或守护进程/);
+      assert.match(start.stdout, /没有独立的 Perch 桥接进程或守护进程/);
       assert.match(start.stdout, /断开终端与关闭实际窗格不同/);
       assert.match(start.stdout, /发现与能力因提供方和集成而异/);
     }
     for (const args of [['view', '--help'], ['help', 'view']]) {
       const view = run(...args, '--lang', lang);
       assert.equal(view.status, 0, view.stderr);
-      assert.match(view.stdout, /agent-session view <id> \[--lang zh\|en\]/);
-      assert.match(view.stdout, /agent-session view "\$id"/);
+      assert.match(view.stdout, /perch view <id> \[--lang zh\|en\]/);
+      assert.match(view.stdout, /perch view "\$id"/);
       assert.doesNotMatch(view.stdout, /--json/);
       if (lang === 'en') {
         assert.match(view.stdout, /current terminal without opening a new pane/);
@@ -97,8 +98,8 @@ test('pane and viewer help describes the supported behavior in both languages', 
     }
     const overview = run('--help', '--lang', lang);
     assert.equal(overview.status, 0, overview.stderr);
-    const viewUsage = overview.stdout.split('\n').find(line => line.includes('agent-session view '));
-    assert.equal(viewUsage?.trim(), 'agent-session view <id> [--lang zh|en]');
+    const viewUsage = overview.stdout.split('\n').find(line => line.includes('perch view '));
+    assert.equal(viewUsage?.trim(), 'perch view <id> [--lang zh|en]');
   }
 });
 
@@ -109,13 +110,13 @@ test('send and input help distinguish provider delivery from native terminal inp
     const send = run('send', '--help');
     assert.equal(overview.status, 0, overview.stderr);
     assert.equal(send.status, 0, send.stderr);
-    assert.match(overview.stdout, /agent-session input <id> <text> \[--enter\]/);
-    assert.match(overview.stdout, /agent-session input <id> --key <key>/);
-    assert.match(send.stdout, /agent-session send <id> <message>/);
-    assert.match(send.stdout, /agent-session send <id> --stdin/);
-    assert.match(send.stdout, /agent-session send "\$id" '\/skill:example'/);
+    assert.match(overview.stdout, /perch input <id> <text> \[--enter\]/);
+    assert.match(overview.stdout, /perch input <id> --key <key>/);
+    assert.match(send.stdout, /perch send <id> <message>/);
+    assert.match(send.stdout, /perch send <id> --stdin/);
+    assert.match(send.stdout, /perch send "\$id" '\/skill:example'/);
     for (const output of [overview.stdout, send.stdout]) {
-      assert.doesNotMatch(output, /--type|--press|agent-session (?:type|press|command) /);
+      assert.doesNotMatch(output, /--type|--press|perch (?:type|press|command) /);
     }
     if (lang === 'en') {
       assert.match(send.stdout, /provider's message transport[\s\S]*does not infer intent/);
@@ -134,15 +135,15 @@ test('send and input help distinguish provider delivery from native terminal inp
     for (const args of [['input', '--help'], ['help', 'input']]) {
       const input = run(...args);
       assert.equal(input.status, 0, input.stderr);
-      assert.match(input.stdout, /agent-session input <id> <text> \[--enter\]/);
-      assert.match(input.stdout, /agent-session input <id> --key <key>/);
-      assert.match(input.stdout, /agent-session input "\$id" '\/vibe' --enter/);
-      assert.doesNotMatch(input.stdout, /--type|--press|agent-session (?:type|press|command) /);
+      assert.match(input.stdout, /perch input <id> <text> \[--enter\]/);
+      assert.match(input.stdout, /perch input <id> --key <key>/);
+      assert.match(input.stdout, /perch input "\$id" '\/vibe' --enter/);
+      assert.doesNotMatch(input.stdout, /--type|--press|perch (?:type|press|command) /);
       for (const key of ['Enter', 'Escape', 'Tab', 'Backspace', 'Up', 'Down', 'Left', 'Right']) {
         assert.match(input.stdout, new RegExp(`\\b${key}\\b`));
       }
       if (lang === 'en') {
-        assert.match(input.stdout, /agent-session input "\$id" 'Summarize the current work' --enter/);
+        assert.match(input.stdout, /perch input "\$id" 'Summarize the current work' --enter/);
         assert.match(input.stdout, /ordinary editor is ready[\s\S]*input is empty[\s\S]*no popup/);
         assert.match(input.stdout, /nonempty, single-line, without control\s+characters[\s\S]*64 KiB in UTF-8/);
         assert.match(input.stdout, /--key cannot be combined with text or --enter/);
@@ -152,7 +153,7 @@ test('send and input help distinguish provider delivery from native terminal inp
         assert.match(input.stdout, /terminal\s+delivery only[\s\S]*partial delivery[\s\S]*null/);
         assert.match(input.stdout, /running or blocked/);
       } else {
-        assert.match(input.stdout, /agent-session input "\$id" '总结当前工作' --enter/);
+        assert.match(input.stdout, /perch input "\$id" '总结当前工作' --enter/);
         assert.match(input.stdout, /普通编辑器已就绪、输入为空且没有弹窗/);
         assert.match(input.stdout, /非空单行文本，不含控制字符（UTF-8 最多 64 KiB）/);
         assert.match(input.stdout, /--key 不能与文本或 --enter 同时使用/);

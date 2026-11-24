@@ -11,7 +11,7 @@ export function validateVersion(version) {
 }
 
 export function assetFilename(version) {
-  return `agent-session-${validateVersion(version).replace('+', '-')}.tgz`;
+  return `perch-${validateVersion(version).replace('+', '-')}.tgz`;
 }
 
 export function releaseIntent(previous, current, notes) {

@@ -1,10 +1,52 @@
-# agent-session
+# Perch
 
 用一个 CLI 管理本机当前用户的 OMP、Codex CLI 和 Claude Code 对话。可以发现已有会话，也可以新建可由脚本控制的后台会话；不需要常驻的中心服务。
 
 ## 安装与要求
 
-需要 Node.js 22.13 或更高版本及 npm。从本项目源码目录安装依赖并运行：
+按需选择以下一种安装方式。源码、npm 包和 `perch.mjs` 需要 Node.js 22.13 或更高版本；npm 包和源码还需要 npm。独立二进制运行时不需要 Node.js 或 Bun。Bun 1.4.4 仅用于从源码构建独立产物。
+
+所有方式都需要另行安装并配置所用的 OMP、Codex CLI 或 Claude Code；pane 功能另需 `terminal-pane`，部分示例使用 `jq`。支持 macOS 和 Linux（Linux 二进制需要 glibc），不支持 Windows 原生运行。本机发现与发送在 macOS 上验证，其他平台取决于提供方及终端。Claude 新增的托管路径尚未实机验证；各提供方已有会话的能力见下表。
+
+### 从 GitHub Release 安装
+
+从本项目的 GitHub Release 页面下载同一版本的 `SHA256SUMS.txt` 和所需文件到空目录。校验文件应来自可信的同一发行版本。只下载部分资产时，不要直接检查整个清单：先定义下列函数，它只接受清单中恰好一条文件名完全匹配的记录，并在缺失、重复或校验失败时返回非零。
+
+```sh
+verify_perch() {
+  awk -v name="$1" '$2 == name { print; n++ } END { if (n != 1) exit 1 }' \
+    SHA256SUMS.txt > perch-checksum.txt &&
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c perch-checksum.txt
+  else
+    shasum -a 256 -c perch-checksum.txt
+  fi
+}
+```
+
+**npm 包**：下载 `perch-<版本>.tgz`，将以下版本替换为下载的版本。校验成功后从本地文件安装；本包保持 private，不从 npm registry 发布。
+
+```sh
+verify_perch perch-0.1.0.tgz && npm install -g --ignore-scripts ./perch-0.1.0.tgz && perch --help
+```
+
+**单文件 JavaScript**：下载 `perch.mjs`，校验成功后使用 Node.js 运行，无需安装依赖：
+
+```sh
+verify_perch perch.mjs && node ./perch.mjs --help
+```
+
+**独立二进制**：根据系统和 CPU 选择 `perch-darwin-arm64`、`perch-darwin-x64`、`perch-linux-arm64` 或 `perch-linux-x64`。`uname -m` 为 `arm64` 或 `aarch64` 时选 `arm64`，为 `x86_64` 或 `amd64` 时选 `x64`；`uname -s` 的 `Darwin` 对应 `darwin`，`Linux` 对应 `linux`。以下以 macOS Apple Silicon 为例：
+
+```sh
+verify_perch perch-darwin-arm64 && chmod +x ./perch-darwin-arm64 && ./perch-darwin-arm64 --help
+```
+
+将二进制放入 `PATH` 中并命名为 `perch` 后，即可直接使用下文命令。单文件 JavaScript 则以 `node /path/to/perch.mjs` 代替 `perch`。
+
+### 从源码运行
+
+在源码目录安装依赖并运行：
 
 ```sh
 npm ci --ignore-scripts
@@ -12,36 +54,29 @@ npm ci --ignore-scripts
 ./cli.mjs list
 ```
 
-如需从任意目录使用 `agent-session`，可在源码目录运行以下命令，并将 `~/.local/bin` 加入 `PATH`；保留源码目录及其依赖：
+如需从任意目录使用 `perch`，可在源码目录运行以下命令，并将 `~/.local/bin` 加入 `PATH`；保留源码目录及其依赖：
 
 ```sh
 mkdir -p "$HOME/.local/bin"
-ln -s "$PWD/cli.mjs" "$HOME/.local/bin/agent-session"
+ln -s "$PWD/cli.mjs" "$HOME/.local/bin/perch"
 ```
 
-也可从 GitHub Release 安装。下载同一版本的 `agent-session-<版本>.tgz` 和 `SHA256SUMS.txt` 到一个空目录；校验通过后安装本地文件（以下以首个候选版本为例，不从 npm registry 发布本包）：
-
-```sh
-shasum -a 256 -c SHA256SUMS.txt && npm install --global --ignore-scripts ./agent-session-0.1.0.tgz
-agent-session --help
-```
-
-对应功能需要本机安装并配置相应的 OMP、Codex CLI 或 Claude Code；pane 功能另需 `terminal-pane`，部分示例使用 `jq`。本机发现与发送在 macOS 上验证，其他平台的支持取决于提供方及终端。Claude 新增的托管路径尚未实机验证；各提供方已有会话的能力见下表。
+也可安装 Bun 1.4.4 后在源码目录运行 `bun scripts/build-portable.mjs <output-directory> <target>` 构建：`target` 为 `mjs`、`darwin-arm64`、`darwin-x64`、`linux-arm64` 或 `linux-x64`。输出分别为 `perch.mjs` 或 `perch-<target>`，内含运行所需依赖、桥接程序和 OMP 扩展。
 
 ## 快速使用
 
-以下示例假设已按上方配置 `agent-session` 命令；否则在源码目录使用 `./cli.mjs`。
+以下示例假设已配置 `perch` 命令；否则在源码目录使用 `./cli.mjs`，或按所选安装方式替换命令。
 
 ```sh
-agent-session list
-agent-session list --provider codex --json
-agent-session send "$id" '请告诉我当前进度'  # id 是 list 给出的完整 ID
-agent-session history "$id" --limit 10
+perch list
+perch list --provider codex --json
+perch send "$id" '请告诉我当前进度'  # id 是 list 给出的完整 ID
+perch history "$id" --limit 10
 ```
 
-`agent-session --help` 查看命令总览。在任一子命令后加 `--help` 或 `-h`，可查看该命令的参数和示例，例如 `agent-session start --help`、`agent-session integration install omp --help`。帮助只打印说明，不会启动会话或安装扩展。
+`perch --help` 查看命令总览。在任一子命令后加 `--help` 或 `-h`，可查看该命令的参数和示例，例如 `perch start --help`、`perch integration install omp --help`。帮助只打印说明，不会启动会话或安装扩展。
 
-终端提示支持简体中文和英文。默认按 `LC_ALL`、`LC_MESSAGES`、`LANG` 的优先级选择语言；其他语言及 `C` 环境使用英文。用 `agent-session list --lang zh` 或 `agent-session --lang en --help` 可临时覆盖。会话标题、聊天正文、路径和 ID 保留原文；切换语言不改变 `--json` 的输出。
+终端提示支持简体中文和英文。默认按 `LC_ALL`、`LC_MESSAGES`、`LANG` 的优先级选择语言；其他语言及 `C` 环境使用英文。用 `perch list --lang zh` 或 `perch --lang en --help` 可临时覆盖。会话标题、聊天正文、路径和 ID 保留原文；切换语言不改变 `--json` 的输出。
 
 输出到交互终端时，CLI 会用颜色区分标题、会话 ID、角色和状态。管道、重定向及 `--json` 输出不着色；设置 `NO_COLOR=1` 也可禁用颜色。列表的编号说明与表格之间留一空行。
 交互终端始终使用表格，前三列是标题、完整 ID 和状态。窄窗口也不切换布局或截断字段；超宽行由终端自然换行。
@@ -61,7 +96,7 @@ agent-session history "$id" --limit 10
 | `stopped` | 宿主确认会话或其进程已停止 |
 | `unknown` | 没有可靠状态，或无法识别宿主返回的值 |
 
-`wait` 布尔字段仍表示能否调用 `agent-session wait`，与 `status` 独立。一次等待超时不改变会话状态。
+`wait` 布尔字段仍表示能否调用 `perch wait`，与 `status` 独立。一次等待超时不改变会话状态。
 
 `send` 使用提供方的消息投递通道，不根据文本推断意图，也不会将斜杠开头的消息转换为终端命令。它收到回执就退出，不等模型回复，也不会新开或恢复会话。`--json` 的 `accepted: true` 表示已接收，`false` 表示明确未发送成功，`null` 表示投递结果未知。后两者退出码非零；结果未知时先查 `history`，不要自动重发。要向原生终端输入文本或按键，请使用 `input`。
 
@@ -77,14 +112,14 @@ agent-session history "$id" --limit 10
 
 ```sh
 # 输入并提交普通聊天
-agent-session input "$id" '请告诉我当前进度' --enter
+perch input "$id" '请告诉我当前进度' --enter
 # 输入并执行切换命令
-agent-session input "$id" '/vibe' --enter
+perch input "$id" '/vibe' --enter
 # 单独按一个键
-agent-session input "$id" --key Enter
+perch input "$id" --key Enter
 # OMP 默认键位：把编辑器中的文本排到当前任务之后
-agent-session input "$id" '完成当前任务后再查这条新告警'
-agent-session input "$id" --key ctrl+q
+perch input "$id" '完成当前任务后再查这条新告警'
+perch input "$id" --key ctrl+q
 ```
 
 终端输入的 `accepted: true` 只表示终端已接收，不表示应用已执行；部分投递或写入后的传输失败可能返回 `null`。结果未知时先检查会话，不要自动重试。
@@ -99,18 +134,18 @@ For native OMP terminal input, `input ID TEXT [--enter]` types literal text, whi
 
 ```sh
 # 每一步都是独立命令。wait 超时不会取消任务，仍可用同一 id 继续等。
-job=$(agent-session start omp --cwd "$PWD" --json) || exit 1
+job=$(perch start omp --cwd "$PWD" --json) || exit 1
 id=$(printf '%s' "$job" | jq -er .id) || exit 1
-agent-session send "$id" '整理今天的工作，先给我草稿，不要提交' || exit 1
-agent-session wait "$id" --timeout 300 || exit $?
-agent-session history "$id" --limit 2
-agent-session close "$id"
-agent-session resume "$id"    # 重新打开同一段对话，不会发消息
+perch send "$id" '整理今天的工作，先给我草稿，不要提交' || exit 1
+perch wait "$id" --timeout 300 || exit $?
+perch history "$id" --limit 2
+perch close "$id"
+perch resume "$id"    # 重新打开同一段对话，不会发消息
 ```
 
 - OMP 对话 ID 为 `omp:<原生会话 UUID>`：关闭后仍可用 `history` 读取已保存的托管记录；`resume` 打开同一记录，已经运行则复用，不补发消息或自动续做。旧的 `omp:<PID>:<随机值>` 不是持久 ID；对仍在线的会话，重新 `list --provider omp`，替换脚本中保存的旧值。`omp:pid-…` 仅标识进程，不能恢复。暂不支持恢复已关闭的原生 TUI、Codex 或 Claude。
-- 托管模式的 `start` 不带消息；模型可用 `--model` 指定。多行消息可通过 `agent-session send "$id" --stdin` 发送。
-- OMP 托管和原生启动都支持 `--model 模型名[:思考等级]`；省略等级时沿用 OMP 默认值。例如 `agent-session start omp --model MODEL --json`，请将 `MODEL` 替换为本机可用模型。提供方原始参数放在 `--` 之后，`--json` 等会话选项放在之前。原生模式逐项透传；托管 OMP 仅支持 `-e`/`--extension` 和 `--thinking`，其余托管模式不接受额外参数。
+- 托管模式的 `start` 不带消息；模型可用 `--model` 指定。多行消息可通过 `perch send "$id" --stdin` 发送。
+- OMP 托管和原生启动都支持 `--model 模型名[:思考等级]`；省略等级时沿用 OMP 默认值。例如 `perch start omp --model MODEL --json`，请将 `MODEL` 替换为本机可用模型。提供方原始参数放在 `--` 之后，`--json` 等会话选项放在之前。原生模式逐项透传；托管 OMP 仅支持 `-e`/`--extension` 和 `--thinking`，其余托管模式不接受额外参数。
 - `wait ID` 默认不设时限；已经空闲（包括尚未发过消息）就立即返回。`--timeout N` 限制等待秒数，`--timeout 0` 只查当前状态。`--json` 返回状态，不附带聊天正文。要看回复，另用 `history`。
 - `wait` 退出码：`0` 已完成；`2` 等待超时；`3` 需要人工输入；`1` 失败、中断或参数错误。脚本应按退出码分支；需要人工介入时不要自动同意，也不要把部分回复当最终结果。
   没有通过此 CLI 回答权限弹窗的命令。`needs_input` 是交给人的信号，不表示可以用下一条 `send` 代替批准。在没有交互窗口的托管会话中，先检查历史，再决定是否关闭并换到原生终端。
@@ -124,20 +159,20 @@ agent-session resume "$id"    # 重新打开同一段对话，不会发消息
 
 ```sh
 # 在当前 Tern、Herdr 或 tmux pane 的右侧显示新会话
-agent-session start omp --pane right
+perch start omp --pane right
 
 # 不依赖当前 pane，指定 Tern 工作区和标签页
-agent-session start codex --pane tern --workspace 'work' --tab 'agents' --json
+perch start codex --pane tern --workspace 'work' --tab 'agents' --json
 
 # Herdr 工作区和标签页
-agent-session start omp --pane herdr --workspace work --tab agents
+perch start omp --pane herdr --workspace work --tab agents
 # tmux 会话和窗口
-agent-session start omp --pane tmux --workspace work --tab agents
+perch start omp --pane tmux --workspace work --tab agents
 ```
 
-显示位置只在指定 `--pane` 时生效，需要在 `PATH` 中安装 `terminal-pane`。`tern`、`herdr` 和 `tmux` 均须指定 `--workspace` 和 `--tab`：前两者是工作区和标签页名称，tmux 则是会话和窗口名称。目标不存在就创建；标签页或窗口已存在则在其中新增分屏，不覆盖已有内容。pane 展示同一个会话最近 20 条用户和助手消息，并持续刷新。关掉观察 pane 不等于 `agent-session close`。
+显示位置只在指定 `--pane` 时生效，需要在 `PATH` 中安装 `terminal-pane`。`tern`、`herdr` 和 `tmux` 均须指定 `--workspace` 和 `--tab`：前两者是工作区和标签页名称，tmux 则是会话和窗口名称。目标不存在就创建；标签页或窗口已存在则在其中新增分屏，不覆盖已有内容。pane 展示同一个会话最近 20 条用户和助手消息，并持续刷新。关掉观察 pane 不等于 `perch close`。
 
-总管仍使用返回的会话 `id` 发送消息；`pane` 是展示位置，不是发送目标。如果会话已启动但 pane 打开失败，请保留返回的 `id`，不要重新 `start`。可以在想用的终端执行 `agent-session view "$id"` 查看已有会话。
+总管仍使用返回的会话 `id` 发送消息；`pane` 是展示位置，不是发送目标。如果会话已启动但 pane 打开失败，请保留返回的 `id`，不要重新 `start`。可以在想用的终端执行 `perch view "$id"` 查看已有会话。
 
 ### 在 pane 启动原生交互界面
 
@@ -145,28 +180,28 @@ agent-session start omp --pane tmux --workspace work --tab agents
 
 ```sh
 # 当前窗格右侧
-agent-session start omp "你好" --pane right --native
-agent-session start omp --native --pane right --cwd "$PWD" --model MODEL --json
-agent-session start codex --native --pane right --cwd "$PWD" --model MODEL --json
+perch start omp "你好" --pane right --native
+perch start omp --native --pane right --cwd "$PWD" --model MODEL --json
+perch start codex --native --pane right --cwd "$PWD" --model MODEL --json
 
 # 指定 Tern 工作区和标签页
-agent-session start claude --native --pane tern --workspace work --tab agents --cwd "$PWD" --model MODEL --executable /absolute/path/to/claude --json
+perch start claude --native --pane tern --workspace work --tab agents --cwd "$PWD" --model MODEL --executable /absolute/path/to/claude --json
 # 指定 Herdr 或 tmux 位置
-agent-session start omp --native --pane herdr --workspace work --tab agents
-agent-session start omp --native --pane tmux --workspace work --tab agents
+perch start omp --native --pane herdr --workspace work --tab agents
+perch start omp --native --pane tmux --workspace work --tab agents
 ```
 
 原生模式的 JSON 回执只有 `{provider, mode: "native", pane: {backend, id}}`。其中 `pane.id` 是窗格标识，不是聊天会话 ID，不能直接用于 `send`、`history`、`wait` 或 `close`。不同提供方及集成对原生会话的发现和可用操作各不相同；通过 `list` 查看实际能力，不要假定原生 TUI 一定可以被程序控制。
 
-原生模式没有独立的 agent-session 桥接进程或守护进程；Tern、tmux 等终端后端持有 PTY 并管理程序生命周期。断开终端或 detach 与关闭实际窗格不同：关闭实际窗格会结束其中的程序；这也不是对托管会话执行 `agent-session close`。如需交互或处理权限请求，请使用原生 TUI。
+原生模式没有独立的 Perch 桥接进程或守护进程；Tern、tmux 等终端后端持有 PTY 并管理程序生命周期。断开终端或 detach 与关闭实际窗格不同：关闭实际窗格会结束其中的程序；这也不是对托管会话执行 `perch close`。如需交互或处理权限请求，请使用原生 TUI。
 
 ### 读取会话历史
 
 历史按时间从早到晚输出，默认取最后 20 条聊天消息。`--all` 取全部可读聊天；`--json` 便于脚本处理。例如：
 
 ```sh
-printf '%s\n' '第一行' '第二行' | agent-session send "$id" --stdin
-agent-session history "$id" --all --json | jq -r '.[] | select(.role == "assistant") | .text'
+printf '%s\n' '第一行' '第二行' | perch send "$id" --stdin
+perch history "$id" --all --json | jq -r '.[] | select(.role == "assistant") | .text'
 ```
 
 消息含敏感信息时，建议从标准输入读取，不要把正文放入 shell 历史。agent 按自身设置保存会话；本地桥接进程在会话存活期间可持有回复以供等待。工具不使用提权，不管理其他系统用户的会话。
@@ -175,17 +210,19 @@ agent-session history "$id" --all --json | jq -r '.[] | select(.role == "assista
 
 | Agent | 能发现的既有会话 | 新建可管理会话 |
 |---|---|---|
-| OMP | 持有会话锁且能绑定同一份日志时可读聊天分支；未写盘的终端可能只有进程线索。加载本地扩展后可向原终端发送消息 | `agent-session start omp`，通过原生 RPC 启动新会话 |
-| Codex CLI | 共享 app-server 上已加载的 CLI 线程可以对话；不能绑定线程的终端仅作进程线索，不从归档恢复 | `agent-session start codex`，不要求先开一个 TUI |
-| Claude Code | 从 `claude agents --json` 发现活会话，唯一匹配本地记录时可读历史；普通 TUI 无程序化输入口 | `agent-session start claude --executable /绝对路径/claude`，使用下述可信原生文件。新增托管路径尚未实机验证 |
+| OMP | 持有会话锁且能绑定同一份日志时可读聊天分支；未写盘的终端可能只有进程线索。加载本地扩展后可向原终端发送消息 | `perch start omp`，通过原生 RPC 启动新会话 |
+| Codex CLI | 共享 app-server 上已加载的 CLI 线程可以对话；不能绑定线程的终端仅作进程线索，不从归档恢复 | `perch start codex`，不要求先开一个 TUI |
+| Claude Code | 从 `claude agents --json` 发现活会话，唯一匹配本地记录时可读历史；普通 TUI 无程序化输入口 | `perch start claude --executable /绝对路径/claude`，使用下述可信原生文件。新增托管路径尚未实机验证 |
 
 要让以后启动的 OMP 会话自动加载扩展，可由当前用户主动安装：
 
 ```sh
-agent-session integration install omp
+perch integration install omp
 ```
 
-安装结果中的 `path` 是唯一写入的扩展文件；默认位于 `~/.omp/agent/extensions/agent-session.ts`。安装位置随当前 OMP 配置变化：`OMP_PROFILE`（或未设置时的 `PI_PROFILE`）选择命名 profile，`PI_CONFIG_DIR` 可改变配置根目录；`PI_CODING_AGENT_DIR` 只覆盖默认 profile 的目录。请在与目标 OMP 会话相同的环境中运行安装命令。再次执行不会覆盖已有文件；若同名文件不属于本安装，命令会报错。扩展引用本项目的 `omp-extension.ts`，请保留项目目录。
+安装结果中的 `path` 是唯一写入的扩展文件；默认位于 `~/.omp/agent/extensions/agent-session.ts`。安装位置随当前 OMP 配置变化：`OMP_PROFILE`（或未设置时的 `PI_PROFILE`）选择命名 profile，`PI_CONFIG_DIR` 可改变配置根目录；`PI_CODING_AGENT_DIR` 只覆盖默认 profile 的目录。请在与目标 OMP 会话相同的环境中运行安装命令。再次执行不会覆盖已有文件；若同名文件不属于本安装，命令会报错。源码安装的扩展引用项目中的 `omp-extension.ts`，请保留项目目录。
+
+为兼容已有会话，存储路径、环境变量、桥接协议和扩展文件名保持不变。
 
 已运行的 OMP TUI 需要重启后才会加载扩展。要检查或撤销安装，将下面的路径替换为安装结果中的 `path`；确认它是本工具安装的文件后，只删除该文件：
 
@@ -201,7 +238,7 @@ project="$PWD" # 从源码目录运行
 omp -e "$project/omp-extension.ts"
 ```
 
-OMP 若取消了切换会话或分支的操作，扩展会暂停投递以防误发。在原终端输入 `/agent-session-reconnect`，然后重新 `list` 获取新的 ID。
+OMP 若取消了切换会话或分支的操作，扩展会暂停投递以防误发。在原终端输入 `/perch-reconnect`，然后重新 `list` 获取新的 ID。已安装或正在运行的旧版扩展仍使用 `/agent-session-reconnect`。
 
 Claude 可用以下入口启动：
 
@@ -210,7 +247,7 @@ project="$PWD" # 从源码目录运行
 node "$project/adapters/claude-bridge.mjs" /absolute/path/to/claude
 ```
 
-Claude 启动命令中的路径应替换为您信任的原生 Claude 可执行文件。请在可信工作目录运行：Claude 的非交互模式会加载该目录适用的配置。不代答权限询问；需要询问的操作被拒绝。从另一个终端用 `agent-session` 聊天，原终端按 Ctrl-C 退出。OMP 扩展和 Claude 入口都只在本机同一系统用户内开放会话读写。
+Claude 启动命令中的路径应替换为您信任的原生 Claude 可执行文件。请在可信工作目录运行：Claude 的非交互模式会加载该目录适用的配置。不代答权限询问；需要询问的操作被拒绝。从另一个终端用 `perch` 聊天，原终端按 Ctrl-C 退出。OMP 扩展和 Claude 入口都只在本机同一系统用户内开放会话读写。
 
 ## 参与项目
 

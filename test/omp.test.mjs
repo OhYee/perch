@@ -149,7 +149,7 @@ test('extension discovers its live session, delivers once, follows branch and re
     await handlers.get('session_before_switch')({}, context);
     title = undefined;
     await assert.rejects(() => history(replacement, Infinity));
-    await commands.get('agent-session-reconnect').handler('', context);
+    await commands.get('perch-reconnect').handler('', context);
     const reconnected = (await list()).find(row => row._sessionId === sessionId);
     assert.ok(reconnected);
     assert.equal(reconnected.title, undefined);

@@ -11,6 +11,7 @@ import { translateDiagnostic } from './diagnostics.mjs';
 import { overview, commandHelp, sessionStatus } from './help.mjs';
 import { followConversation } from './view.mjs';
 import { sendTerminalInput, supportedTerminalKeys } from './terminal-input.mjs';
+import { cliInvocation, embeddedOmpExtension } from './portable-runtime.mjs';
 
 const providers = ['omp', 'codex', 'claude'];
 const labels = {
@@ -27,7 +28,7 @@ const style = (text, code, stream = process.stdout) =>
   stream.isTTY && !Object.hasOwn(process.env, 'NO_COLOR') && process.env.TERM !== 'dumb' && !process.argv.slice(2).includes('--json')
     ? `\x1b[${code}m${text}\x1b[0m` : text;
 function highlightHelp(help) {
-  const token = /(\bagent-session\s+)(integration(?:\s+install(?:\s+omp)?)?|list|start|send|input|wait|history|view|close|help)\b|(?<![\w-])--[\w-]+|(?<![\w-])-[a-zA-Z](?![\w-])|<[^<>\n]+>|\b(?:idle|running|blocked|failed|stopped|unknown)\b/g;
+  const token = /(\bperch\s+)(integration(?:\s+install(?:\s+omp)?)?|list|start|send|input|wait|history|view|close|help)\b|(?<![\w-])--[\w-]+|(?<![\w-])-[a-zA-Z](?![\w-])|<[^<>\n]+>|\b(?:idle|running|blocked|failed|stopped|unknown)\b/g;
   return help.split('\n').map(line => {
     if (/^\s*(?:Usage:|用法：|Examples:|示例：)\s*$/.test(line)) return style(line, 1);
     return line.replace(token, (match, prefix, command) => {
@@ -70,7 +71,9 @@ const json = value => console.log(JSON.stringify(value, null, 2));
 const opt = (type = 'boolean') => ({ type });
 async function adapter(name) {
   if (!providers.includes(name)) throw Error(tr(`Unknown provider: ${quote(name)}`, `未知提供方：${quote(name)}`));
-  return import(`./adapters/${name}.mjs`);
+  if (name === 'omp') return import('./adapters/omp.mjs');
+  if (name === 'codex') return import('./adapters/codex.mjs');
+  return import('./adapters/claude.mjs');
 }
 
 function validatePaneOptions(values) {
@@ -140,7 +143,7 @@ async function launchPane(values, session, provider, cwd, nativeExecutable, init
         ? [...(process.env.XDG_STATE_HOME ? [`XDG_STATE_HOME=${resolve(cwd, process.env.XDG_STATE_HOME)}`] : ['-u', 'XDG_STATE_HOME']),
             `PI_CODING_AGENT_DIR=${resolve(cwd, process.env.PI_CODING_AGENT_DIR || join(homedir(), '.omp/agent'))}`]
         : [`CLAUDE_CONFIG_DIR=${resolve(cwd, process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'))}`];
-    args.push('/usr/bin/env', ...environment, process.execPath, fileURLToPath(import.meta.url), 'view', session.id, '--lang', lang);
+    args.push('/usr/bin/env', ...environment, ...cliInvocation(), 'view', session.id, '--lang', lang);
   }
   let stdout;
   try {
@@ -193,8 +196,7 @@ async function installOmpIntegration() {
     : agentOverride && agentOverride !== inheritedProfileDir ? resolve(agentOverride) : join(root, 'agent');
   const dir = join(agentDir, 'extensions');
   const path = join(dir, 'agent-session.ts');
-  const source = fileURLToPath(new URL('./omp-extension.ts', import.meta.url));
-  const content = `export { default } from ${JSON.stringify(source)};\n`;
+  const content = embeddedOmpExtension ?? `export { default } from ${JSON.stringify(fileURLToPath(new URL('./omp-extension.ts', import.meta.url)))};\n`;
   const conflict = () => Error(tr(
     `Cannot install OMP integration: ${quote(path)} already exists and is not this installation; remove or move it before retrying.`,
     `无法安装 OMP 集成：${quote(path)} 已存在且不是本次安装的文件；请先移走或删除它，再重试。`,
@@ -381,7 +383,7 @@ async function run([command, ...args]) {
   const matches = direct ? [direct] : (await api.list()).filter(s => s.id === id);
   if (!matches.length && (command === 'history' || command === 'send')) {
     const saved = await api.savedSession?.(id);
-    if (saved && command === 'send') throw Error(tr(`Session is closed; run agent-session resume ${quote(id)} first`, `会话已关闭，请先执行 agent-session resume ${quote(id)}`));
+    if (saved && command === 'send') throw Error(tr(`Session is closed; run perch resume ${quote(id)} first`, `会话已关闭，请先执行 perch resume ${quote(id)}`));
     if (saved) matches.push(saved);
   }
   if (matches.length !== 1) throw Error(matches.length ? tr(`Ambiguous session: ${quote(id)}`, `会话不唯一：${quote(id)}`) : tr(`Session no longer listed: ${quote(id)}`, `会话已不在列表中：${quote(id)}`));
