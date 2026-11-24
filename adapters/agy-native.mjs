@@ -77,7 +77,7 @@ async function installation() {
 
 function sameFile(a, b) { return a.dev === b.dev && a.ino === b.ino; }
 
-function macArgv(args, names) {
+export function macArgv(args, names) {
   const executable = names.find(name => args === name || args.startsWith(`${name} `));
   if (!executable) return null;
   // ps 会展平 argv；只接受可明确判定为交互启动的形式，空格歧义不猜测。
@@ -366,14 +366,15 @@ export function createNativeAdapter({ inspectProcesses: inspect = inspectProcess
       };
       let reports = await read();
       if (!reports.length) return new Map();
-      // 状态行不是心跳；只有本次查询中的新报告可升为会话。先有收据才等待，
-      // 所有候选共用短时间窗口，不能用旧收据、初始 argv 或目录猜当前对话。
-      const baseline = new Map(reports.map(report => [report.pid, report.observedAt]));
-      const fresh = report => report.observedAt > since && report.observedAt !== baseline.get(report.pid);
+      // 首次进程检查也属于本次查询；它完成前收到的报告已是新鲜证据。
+      // 状态行没有心跳，只有尚未上报的候选才需要在同一短窗口内等待。
+      const fresh = report => report.observedAt > since;
+      const waiting = new Set(reports.filter(report => !fresh(report)).map(report => report.pid));
       const deadline = performance.now() + observeMs;
-      while (performance.now() < deadline && reports.filter(fresh).length < baseline.size) {
+      while (waiting.size && performance.now() < deadline) {
         await delay(Math.min(45, Math.max(0, deadline - performance.now())));
         reports = await read();
+        for (const report of reports) if (fresh(report)) waiting.delete(report.pid);
       }
       // 等待时进程也可能刚退出；不要把开始检查时的 PID 线索带回去。
       const current = await currentRows(pid);
@@ -395,7 +396,9 @@ export function createNativeAdapter({ inspectProcesses: inspect = inspectProcess
           if (owner && ownsReport(claim, owner)) return new Map();
         }
         const latest = await readReceipt(directory, pid);
-        if (!ownsReport(latest, rows.get(pid)) || latest.observedAt !== requested.observedAt || latest.conversation !== requested.conversation) return new Map();
+        // 重复归属检查始终针对同一 UUID。它期间的新刷新可以采用，
+        // 但新的对话/代际、撤销或更旧的收据都不能替代已检查的报告。
+        if (!ownsReport(latest, rows.get(pid)) || latest.observedAt < requested.observedAt || latest.conversation !== requested.conversation) return new Map();
         reports = [latest];
       }
       if (!sameFile(original, await privateReceiptDirectory(directory))) return new Map();

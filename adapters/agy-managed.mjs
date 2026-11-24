@@ -51,12 +51,13 @@ export const problems = Object.freeze({
   stableId: 'Expected a stable managed Antigravity CLI session ID',
   notSaved: 'No saved managed Antigravity CLI session with this ID',
   invalidSaved: 'Invalid saved managed Antigravity CLI session',
-  stateDir: 'Antigravity CLI managed state directory is not private to the current user',
+  stateDir: 'Antigravity CLI managed state directory is not private to the current user; set XDG_STATE_HOME to a private directory you own (mode 0700, not a symlink)',
   closed: 'Antigravity CLI managed session is closed; resume it first',
   noLoad: 'Antigravity CLI does not support loading managed sessions',
   load: 'Antigravity CLI could not load the managed session',
   owner: 'Antigravity CLI managed session already has an owner',
   starting: 'Antigravity CLI managed session is starting or closing',
+  notReady: 'Antigravity CLI managed session did not become ready; retry resume',
   generation: 'Antigravity CLI managed session generation changed',
   history: 'Antigravity CLI history exceeds the retained window',
   empty: 'Message must not be empty',
@@ -87,8 +88,11 @@ export const privateSocketDir = create => privateDir(managedDir(), 'socketDir', 
 export async function sessionDirectory(id, create = false) {
   if (!token(id)) throw failure('stableId');
   const base = stateBase();
-  if (create) await mkdir(base, { recursive: true, mode: 0o700 });
-  const info = await entry(base);
+  let info = await entry(base);
+  if (!info && create) {
+    await mkdir(base, { recursive: true, mode: 0o700 }).catch(() => { throw failure('stateDir'); });
+    info = await entry(base);
+  }
   if (!info) return;
   if (!info.isDirectory() || info.uid !== uid || (info.mode & 0o022)) throw failure('stateDir');
   const root = join(base, 'agent-session');
@@ -327,16 +331,23 @@ export async function resume(id) {
   const saved = await descriptor(id);
   if (!saved) throw failure('notSaved');
   const cwd = await workingDirectory(saved.cwd, true);
-  const live = await lookupBridge(id);
+  const findOwner = () => lookupBridge(id).catch(error => {
+    if (['connection', 'requestTimeout'].includes(error.reason)) return null;
+    throw error;
+  });
+  let sawOwner = Boolean(await ownerRecord(id));
+  const live = await findOwner();
   if (live) return live;
   try { return await launch(cwd, ['load', id]); }
   catch (error) { if (error.message !== problems.starting) throw error; }
-  // 锁的竞争方只等现有执行者就绪，不补发 load，也不把请求超时当作失去所有权。
+  // 竞争方不重发 load。已观测的持锁者完成清理后可提前返回；发布标记前的空窗不代表无人持锁。
   const deadline = performance.now() + 25000;
   do {
-    const winner = await lookupBridge(id);
+    const winner = await findOwner();
     if (winner) return winner;
+    if (await ownerRecord(id)) sawOwner = true;
+    else if (sawOwner && !await entry(socketPath(id))) break;
     await delay(100);
   } while (performance.now() < deadline);
-  throw failure('owner');
+  throw failure('notReady');
 }

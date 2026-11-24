@@ -67,9 +67,10 @@ Source checkouts are never overwritten by release files.`,
 --json emits machine-readable output. Session status values are:
   idle | running | blocked | failed | stopped | unknown
 Status is reported by the host and does not guarantee a verifiable local process.
-Native agy TUIs appear as process clues unless a verified status line report
-identifies a current conversation during the query (macOS, agy 1.5.16).
-Archived agy conversations are not listed.`,
+Recognized native agy TUIs appear as process clues unless a verified status
+line report identifies the current conversation during the query (macOS, agy
+1.5.16). On macOS, ambiguous startup arguments, including values with spaces,
+can hide the process entirely. Archived agy conversations are not listed.`,
       examples: 'perch list --provider omp --json\nperch list --provider agy',
     },
     zh: {
@@ -78,7 +79,8 @@ Archived agy conversations are not listed.`,
 --json 输出机器可读数据。会话 status 枚举：
   idle | running | blocked | failed | stopped | unknown
 状态由宿主报告，不保证存在可验证的本机进程。
-原生 agy TUI 默认只显示进程线索；macOS 的 agy 1.5.16 可在查询期间通过有效状态行报告识别当前对话。
+可识别的原生 agy TUI 默认只显示进程线索；macOS 的 agy 1.5.16 可在查询期间通过有效状态行报告识别当前对话。
+macOS 上，启动参数解析不明确时（例如参数值包含空格），连进程线索也可能不显示。
 不列出归档对话。`,
       examples: 'perch list --provider omp --json\nperch list --provider agy',
     },
@@ -94,6 +96,9 @@ Put provider options after -- except for agy, which accepts no extra arguments.
 Native OMP, Codex, and Claude forward them verbatim. Only managed OMP accepts
 additional arguments (-e/--extension and --thinking).
 Managed agy opens a private ACP session. Sign in to agy separately if required.
+If the state directory is rejected, create a new private directory with
+mkdir -m 700 "$HOME/.perch-state" and set XDG_STATE_HOME to its absolute path.
+Use that same directory for later commands; do not change shared permissions.
 An explicit --model must be offered by agy; Perch does not fall back to the default.
 Without --native, start creates a managed session without sending a prompt; use
 send to submit a message. Without --pane, no viewer is opened. --pane right opens
@@ -113,6 +118,8 @@ workspace and tab requirements and placement rules in both modes. An optional no
 must be a single positional argument; it is passed to the provider at startup.
 Omitting it starts the TUI without an initial prompt. Native agy uses
 --prompt-interactive and does not accept a positional prompt starting with -.
+On macOS, omit the initial prompt and avoid option values with spaces if you
+need to discover the TUI with list; these can make startup arguments ambiguous.
 --json returns only
 {provider, mode: "native", pane: {backend, id}}; pane.id is not a chat ID.
 There is no independent Perch bridge or daemon for native mode: the
@@ -142,6 +149,8 @@ OMP 托管和原生启动均支持 --model 模型名[:思考等级]。省略后�
 提供方参数放在 -- 之后，agy 不接受附加参数。原生 OMP、Codex 和 Claude 原样传递；
 托管模式只有 OMP 接受附加参数（-e/--extension 和 --thinking）。
 托管 agy 新建私有 ACP 会话。如需认证，请先在 agy 中另行登录。
+如果状态目录被拒绝，请用 mkdir -m 700 "$HOME/.perch-state" 创建私有目录；
+将 XDG_STATE_HOME 设为其绝对路径，后续命令使用同一路径。不要更改共享目录的权限。
 指定 --model 时，该模型必须由 agy 提供；Perch 不会退回默认模型。
 不使用 --native 时新建托管会话，不发送提示词；请用 send 发送消息。
 省略 --pane 时不打开查看器；--pane right 在当前终端窗格中分屏打开查看器。
@@ -156,6 +165,8 @@ OMP 托管和原生启动均支持 --model 模型名[:思考等级]。省略后�
 而不是托管会话或查看器。两种模式的具名后端使用相同的工作区、标签页要求和放置规则。
 可选的初始提示词须为单个非空位置参数，省略时不带初始提示词。
 原生 agy 使用 --prompt-interactive 传入提示词，不接受以 - 开头的位置参数。
+如果需要让 macOS 上的 list 发现原生 agy，请省略初始提示词，并避免使用含空格的选项值；
+这些参数可能导致 Perch 无法识别启动方式。
 --json 仅返回
 {provider, mode: "native", pane: {backend, id}}；pane.id 不是聊天会话 ID。
 原生模式没有独立的 Perch 桥接进程或守护进程：终端后端持有 PTY
@@ -182,14 +193,17 @@ perch start agy '你好' --native --pane right`,
       details: `Pass the same stable ID returned by start or list. No prompt is sent and
 interrupted work is not restarted. For agy, only conversations created by Perch
 are eligible, and the provider must support loading them. To read a closed agy
-conversation, resume it first. Native and process-only IDs cannot be resumed.`,
+conversation, resume it first. A long conversation can still reopen; only the
+retained history window is available afterward. Use the same XDG_STATE_HOME
+as at startup. Native and process-only IDs cannot be resumed.`,
       examples: 'perch resume "$id" --json',
     },
     zh: {
       purpose: '重新打开 OMP 或 agy 托管对话；如果仍在运行，则直接复用。',
       details: `使用 start 或 list 返回的同一个稳定 ID。不会发送消息或重做中断的任务。
-agy 只允许恢复 Perch 创建的对话，并要求提供方支持加载。要读取已关闭的 agy
-对话，请先 resume。原生对话 ID 和只有进程号的 ID 不能恢复。`,
+agy 只允许恢复 Perch 创建的对话，并要求提供方支持加载。要读取已关闭的 agy 对话，
+请先 resume。长对话仍可恢复，但只保留窗口内的历史。请使用启动时的 XDG_STATE_HOME。
+原生对话 ID 和只有进程号的 ID 不能恢复。`,
       examples: 'perch resume "$id" --json',
     },
   },
@@ -280,6 +294,10 @@ perch input "$id" --key Ctrl+Q`,
       details: `By default the last 20 messages are shown in chronological order.
 --limit N selects a positive number of messages; --all reads all available
 messages. These options are mutually exclusive. --json emits structured messages.
+Managed agy retains up to 1,024 messages and 4 MiB of chat text. The default
+and --limit can return fewer messages. A running reply can appear while it
+streams; if it exceeds the retention limit, it is removed rather than kept
+as a partial message. --all fails if any messages were omitted or evicted.
 Native agy history is unavailable: Perch cannot verify the current transcript.`,
       examples: `# Set id to an existing session ID from list or start first.
 perch history "$id" --limit 2`,
@@ -288,7 +306,10 @@ perch history "$id" --limit 2`,
       purpose: '读取会话当前可见的聊天消息。',
       details: `默认按时间顺序显示最近 20 条消息。
 --limit N 指定消息条数（正整数）；--all 读取全部可用消息，两者不能同时使用。
---json 输出结构化消息。Perch 无法验证原生 agy TUI 的当前会话记录，因此不读取其历史。`,
+--json 输出结构化消息。托管 agy 最多保留 1,024 条、合计 4 MiB 的聊天文本。
+默认或使用 --limit 时，返回的条数可能更少。回复生成时可看到实时文本；
+如果回复超出保留上限，就会移除整条回复，而不是保留半条；
+如果有消息被省略或淘汰，--all 会报错。Perch 无法验证原生 agy TUI 的当前会话记录，因此不读取其历史。`,
       examples: `# 先将 id 设为 list 或 start 返回的已有会话 ID。
 perch history "$id" --limit 2`,
     },
@@ -297,13 +318,14 @@ perch history "$id" --limit 2`,
     en: {
       purpose: 'Follow a session in the current terminal without opening a new pane.',
       details: `Displays the most recent 20 messages and refreshes as history changes.
+Only retained messages are shown; there may be fewer than 20.
 The viewer is read-only: it never sends messages or closes the session.`,
       examples: `# Set id to an existing session ID from list or start first.
 perch view "$id"`,
     },
     zh: {
       purpose: '在当前终端查看会话，不打开新窗格。',
-      details: `显示最近 20 条消息，并随历史记录变化刷新。
+      details: `显示最近 20 条消息，并随历史记录变化刷新；保留的消息不足 20 条时只显示现有条目。
 查看器为只读，不会发送消息或关闭会话。`,
       examples: `# 先将 id 设为 list 或 start 返回的已有会话 ID。
 perch view "$id"`,
@@ -398,8 +420,9 @@ This changes and saves the agy status line setting; save any previous command
 so you can restore it. Perch does not change settings itself.
 The callback expects piped JSON and must be able to inspect its process ancestry.
 Without a verified report during the query, including when a sandbox blocks
-the check or the TUI is idle, list shows only a process clue. This does not
-enable history, view, send, input, wait or close.`,
+the check or the TUI is idle, a recognized process is listed without a
+conversation ID. Ambiguous startup arguments on macOS can prevent even process
+discovery. This does not enable history, view, send, input, wait or close.`,
       examples: '/statusline perch integration agy-statusline && :\nperch list --provider agy --json',
     },
     zh: {
@@ -409,7 +432,8 @@ enable history, view, send, input, wait or close.`,
 也可用单引号括住的绝对路径替代 perch。后缀会保留用于核实报告来源的 shell。
 该命令会修改并保存 agy 状态行设置；如有原命令请先保留，以便还原。Perch 不会代改设置。
 回调从管道读取 JSON，且必须能检查进程的父子关系。如果沙箱阻止检查、TUI 闲置，
-或因其他原因导致查询期间没有可验证的新报告，list 只显示进程线索。
+或因其他原因导致查询期间没有可验证的新报告，list 只为能识别的进程提供线索。
+macOS 上若启动参数解析不明确，连进程线索也可能不显示。
 此集成不会开启 history、view、send、input、wait 或 close。`,
       examples: '/statusline perch integration agy-statusline && :\nperch list --provider agy --json',
     },

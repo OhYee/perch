@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmod, rmdir, unlink } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
@@ -64,26 +64,60 @@ function rpc(method, params, timeoutMs = startupDeadline - performance.now()) {
 function notifyWaiters(result) {
   for (const done of waiters) done(result);
 }
-function remember(role, text, message) {
-  const bytes = Buffer.byteLength(text);
-  let drop = 0, freed = 0;
-  while (historyBytes + bytes - freed > maxHistoryBytes || history.length + (message ? 0 : 1) - drop > maxHistoryMessages) {
-    // 仅淘汰旧轮次；无法保存本块时不丢弃已有正文。
-    const previous = history[drop++];
-    if (!previous || replay?.open || previous.turn === active?.id) return null;
-    freed += previous.bytes;
+// 固定大小的过滤器防止已丢弃的 ID 以迟到的尾块重新出现。碰撞只会多省略条目，不会留下残片。
+function discardedId(state, key, add = false) {
+  if (!state.discarded) {
+    if (!add) return false;
+    state.discarded = new Uint8Array(MiB);
   }
-  if (drop) { history.splice(0, drop); historyBytes -= freed; omitted = true; }
-  if (!message) { message = { role, text: '', bytes: 0, turn: active?.id }; history.push(message); }
+  const bits = state.discarded;
+  const hash = createHash('sha256').update(generation).update(key).digest();
+  for (let i = 0; i < 16; i += 4) {
+    const bit = hash.readUInt32LE(i) & (bits.length * 8 - 1);
+    const mask = 1 << (bit & 7);
+    if (add) bits[bit >>> 3] |= mask;
+    else if (!(bits[bit >>> 3] & mask)) return false;
+  }
+  return true;
+}
+
+function forgetMessage(state, message) {
+  if (state.messageIds.get(message.key) === message) {
+    state.messageIds.delete(message.key);
+    discardedId(state, message.key, true);
+  }
+  if (state.segment === message) state.segment = { role: message.role, discarded: true };
+  omitted = true;
+}
+
+const emptyMessage = (role, key = null) => ({ role, key, text: '', bytes: 0 });
+
+function retainMessage(state, message, text) {
+  const bytes = Buffer.byteLength(text);
+  if (message.bytes + bytes > maxHistoryBytes) return false;
+  let drop = 0, freed = 0;
+  const newMessage = message.bytes === 0;
+  while (historyBytes + bytes - freed > maxHistoryBytes || history.length + Number(newMessage) - drop > maxHistoryMessages) {
+    // 迟到分片不能为了保住旧条目而挤掉更新的条目。
+    const oldest = history[drop++];
+    if (oldest === message) return false;
+    freed += oldest.bytes;
+  }
+  if (drop) {
+    for (let i = 0; i < drop; i++) forgetMessage(state, history[i]);
+    history.splice(0, drop);
+    historyBytes -= freed;
+  }
+  if (newMessage) history.push(message);
   message.text += text;
   message.bytes += bytes;
   historyBytes += bytes;
-  return message;
+  return true;
 }
 function acceptTurn(turn) {
   if (turn.accepted) return;
   turn.accepted = true;
-  remember('user', turn.text);
+  retainMessage(turn, emptyMessage('user'), turn.text);
   turn.text = undefined;
   turn.admission?.(null, { accepted: true });
 }
@@ -130,18 +164,33 @@ function startChild(cwd) {
 function setTitle(value) {
   if (value === null || typeof value === 'string' && Buffer.byteLength(value) <= 4096) title = value;
 }
-function keepChunk(state, role, update, text) {
-  if (!text) return true;
-  const messageId = update.messageId == null ? null : update.messageId;
-  if (messageId !== null && !opaqueId(messageId)) return false;
-  const previous = state.chunk;
-  const key = messageId === null ? null : `${role}:${messageId}`;
-  const message = key === null ? previous?.key === null && previous.role === role ? previous.message : null : state.messageIds.get(key);
-  const stored = remember(role, text, message);
-  if (!stored) return false;
-  if (key !== null && !message) state.messageIds.set(key, stored);
-  state.chunk = { role, key, message: stored };
-  return true;
+function keepChunk(state, role, { messageId }, text) {
+  if (messageId != null && !opaqueId(messageId)) return stopTransport('protocol');
+  let message;
+  if (messageId == null) {
+    if (state.segment?.role !== role) state.segment = null;
+    if (!text || state.segment?.discarded) return;
+    message = state.segment ??= emptyMessage(role);
+  } else {
+    const key = `${role}:${messageId}`;
+    message = state.messageIds.get(key);
+    if (!message) {
+      if (discardedId(state, key)) return;
+      // 已知 ID 的迟到分片不能结束当前匿名角色段。
+      state.segment = null;
+      if (!text) return;
+      message = emptyMessage(role, key);
+      state.messageIds.set(key, message);
+    } else if (!text) return;
+  }
+  if (retainMessage(state, message, text)) return;
+  // 整条去掉，且后续同 ID 或同一匿名角色段不重新入列为一条「完整」消息。
+  if (message.bytes) {
+    history.splice(history.indexOf(message), 1);
+    historyBytes -= message.bytes;
+  }
+  forgetMessage(state, message);
+  state.truncated = true;
 }
 
 function sessionUpdate(params) {
@@ -152,8 +201,9 @@ function sessionUpdate(params) {
   const content = update.content;
   const visible = content?.type === 'text' && typeof content.text === 'string';
   if (replay?.open) {
-    if (visible && (type === 'user_message_chunk' || type === 'agent_message_chunk') &&
-        !keepChunk(replay, type === 'user_message_chunk' ? 'user' : 'assistant', update, content.text)) stopTransport('history');
+    if (visible && (type === 'user_message_chunk' || type === 'agent_message_chunk')) {
+      keepChunk(replay, type === 'user_message_chunk' ? 'user' : 'assistant', update, content.text);
+    }
     return;
   }
   const turn = active;
@@ -161,7 +211,7 @@ function sessionUpdate(params) {
   if (type === 'agent_message_chunk' || type === 'agent_thought_chunk') {
     if (!(visible || object(content) && ['image', 'audio', 'resource', 'resource_link'].includes(content.type))) return;
     acceptTurn(turn);
-    if (type === 'agent_message_chunk' && visible && !turn.truncated) turn.truncated = !keepChunk(turn, 'assistant', update, content.text);
+    if (type === 'agent_message_chunk' && visible) keepChunk(turn, 'assistant', update, content.text);
   } else if ((type === 'tool_call' || type === 'tool_call_update') && opaqueId(update.toolCallId)) acceptTurn(turn);
 }
 
@@ -294,7 +344,7 @@ function accept(connection) {
     else if (method === 'history') {
       const limit = params?.limit;
       if (!validLimit(limit)) reply(failure('limit'));
-      else if (omitted && (limit === null || limit > history.length)) reply(failure('history'));
+      else if (omitted && limit === null) reply(failure('history'));
       else reply(null, (limit === null ? history : history.slice(-limit)).map(({ role, text }) => ({ role, text })));
     } else if (method === 'close') {
       void shutdown(true, undefined, connection).then(() => reply(null, { closed: true }), () => reply(failure('shutdown')));

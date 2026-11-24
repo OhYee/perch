@@ -4,7 +4,7 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { createNativeAdapter, nativeReceiptDirectory } from '../adapters/agy-native.mjs';
+import { createNativeAdapter, macArgv, nativeReceiptDirectory } from '../adapters/agy-native.mjs';
 
 const firstPid = 61401;
 const secondPid = 61402;
@@ -39,17 +39,24 @@ async function fixture(t) {
   });
   const rows = new Map();
   const queries = [];
+  const beforeInspection = new Map();
   let source;
   const api = createNativeAdapter({
     // 这里替换 OS 观察，不复制生产绑定或 transcript 校验的逻辑。
     async inspectProcesses(pid) {
       queries.push(pid);
+      const before = beforeInspection.get(pid);
+      if (before) {
+        beforeInspection.delete(pid);
+        await before();
+      }
       return pid === undefined ? [...rows.values()] : [...rows.values()].filter(p => p.pid === pid);
     },
     async inspectStatusSource() { return source; },
   });
   return {
     api, proc, rows, home, cwd, executable, queries, receipts,
+    beforeNextInspection(pid, fn) { beforeInspection.set(pid, fn); },
     async publish(pid, payload) {
       source = pid;
       try { return await api.recordNativeStatus(payload); }
@@ -95,6 +102,30 @@ test('AGY keeps same-directory interactive TUI clues separate and ignores nonint
   assert.deepEqual(rows.map(row => row.pid), [firstPid, secondPid]);
   for (const row of rows) assertClue(row, row.pid, f.cwd);
   assert.ok(!JSON.stringify(rows).includes(initial));
+});
+
+test('AGY macOS flattened argv rejects ambiguous prompt or path values for both discovery and callbacks', async t => {
+  const f = await fixture(t);
+  const executable = join(f.home, 'AGY install', 'agy');
+  const names = [executable, 'agy'];
+  const ambiguous = [
+    `${executable} --prompt-interactive=Summarize this repo`,
+    `${executable} -i Summarize this repo`,
+    `${executable} --settings /synthetic/with spaces/settings.json`,
+    `${executable} --log-file=/synthetic/with spaces/agy.log`,
+    `${executable} --prompt-interactive=summary --print`,
+  ];
+  f.rows.set(firstPid, f.proc(firstPid, { argv: macArgv(`${executable} --prompt-interactive=Summary`, names) }));
+  for (const [i, args] of ambiguous.entries()) {
+    const pid = secondPid + i;
+    f.rows.set(pid, f.proc(pid, { argv: macArgv(args, names) }));
+    await assert.rejects(f.publish(pid, report(f, uuids[0], 'Ambiguous')), /callback refused/i);
+  }
+  const rows = await f.api.listNative();
+  assert.equal(rows.length, 1);
+  assertClue(rows[0], firstPid, f.cwd);
+  await assert.rejects(lstat(f.receipts), { code: 'ENOENT' });
+  assert.equal(await f.publish(firstPid, report(f, uuids[0], 'Unambiguous')), 'Perch: AGY conversation observed');
 });
 
 test('AGY targeted clue lookup does not infer a conversation from a PID and drops exited processes', async t => {
@@ -165,6 +196,75 @@ function assertBound(row, pid, uuid, title) {
   assert.equal(row.status, 'idle');
   assert.deepEqual([row.send, row.history, row.wait, row.close], [false, false, false, false]);
 }
+
+function advanceReportClock(t) {
+  // 用单调推进的测试时间控制报告和查询时序，不依赖 sleep 或文件 mtime 粒度。
+  let now = Date.now() - 60_000;
+  t.mock.method(Date, 'now', () => now);
+  return () => { now += 10; };
+}
+
+test('AGY counts a report written during the first process inspection as fresh', async t => {
+  const f = await fixture(t);
+  const advance = advanceReportClock(t);
+  const uuid = uuids[0];
+  f.rows.set(firstPid, f.proc(firstPid));
+  await f.publish(firstPid, report(f, uuid, 'Before query'));
+
+  f.beforeNextInspection(undefined, async () => {
+    advance();
+    await f.publish(firstPid, report(f, uuid, 'During list inspection'));
+  });
+  const [listed] = await f.api.listNative();
+  assertBound(listed, firstPid, uuid, 'During list inspection');
+
+  f.beforeNextInspection(firstPid, async () => {
+    advance();
+    await f.publish(firstPid, report(f, uuid, 'During targeted inspection'));
+  });
+  const found = await f.api.lookupNative(listed.id);
+  assertBound(found, firstPid, uuid, 'During targeted inspection');
+  assert.equal(found.id, listed.id);
+
+  // 下一次查询的开始时间等于上一份报告；旧报告不能重新授权绑定。
+  assert.equal(await f.api.lookupNative(listed.id), undefined);
+});
+
+test('AGY targeted lookup accepts a later report only for the same conversation and live generation', async t => {
+  const f = await fixture(t);
+  const advance = advanceReportClock(t);
+  const [uuid, switched] = uuids;
+  f.rows.set(firstPid, f.proc(firstPid));
+  f.rows.set(secondPid, f.proc(secondPid));
+  await f.publish(firstPid, report(f, uuid, 'Seed target'));
+  await f.publish(secondPid, report(f, uuid, 'Other claimant'));
+  const { generation } = JSON.parse(await readFile(join(f.receipts, `pid-${firstPid}.json`), 'utf8'));
+  const id = `agy:native-${firstPid}.${generation}-${uuid}`;
+
+  const publish = async (conversation, title) => {
+    advance();
+    await f.publish(firstPid, report(f, conversation, title));
+  };
+  const lookupWithRefresh = payload => {
+    f.beforeNextInspection(firstPid, async () => {
+      await publish(uuid, 'During the initial inspection');
+      f.beforeNextInspection(firstPid, () => publish(uuid, 'During revalidation'));
+    });
+    // 精确复核残留的重复声明时，另一个状态行回调恰好更新目标收据。
+    f.beforeNextInspection(secondPid, payload);
+    return f.api.lookupNative(id);
+  };
+  assert.equal(await lookupWithRefresh(() => publish(uuid, 'During live duplicate check')), undefined);
+  f.rows.delete(secondPid);
+  const latest = await lookupWithRefresh(() => publish(uuid, 'During duplicate check'));
+  assertBound(latest, firstPid, uuid, 'During duplicate check');
+  assert.equal(latest.id, id);
+  assert.equal(await lookupWithRefresh(() => publish(switched, 'Switched during duplicate check')), undefined);
+  assert.equal(await lookupWithRefresh(async () => {
+    f.rows.set(firstPid, f.proc(firstPid, { birth: 'reused during duplicate check' }));
+    await publish(uuid, 'Same conversation, different process generation');
+  }), undefined);
+});
 
 test('AGY fresh verified reports bind same-cwd twins independently but do not grant history or input', async t => {
   const f = await fixture(t);

@@ -59,6 +59,17 @@ function prompt({ id, params }) {
   if (text === 'fixture:refusal') return finish('refusal');
   if (text === 'fixture:max-tokens') return finish('max_tokens');
   if (text === 'fixture:cancelled') return finish('cancelled');
+  if (text === 'fixture:oversized') {
+    const part = 'x'.repeat(2 * 1024 * 1024 + 1);
+    const messageId = 'oversized';
+    chunk(part, 'agent_message_chunk', sessionId, messageId);
+    return gate('finish', () => {
+      chunk(part, 'agent_message_chunk', sessionId, messageId);
+      chunk('complete after oversized message', 'agent_message_chunk', sessionId, 'following');
+      chunk('late incomplete fragment', 'agent_message_chunk', sessionId, messageId);
+      finish();
+    });
+  }
   if (text === 'fixture:pending') {
     write({ id: 'permission-1', method: 'session/request_permission', params: { sessionId,
       toolCall: { toolCallId: 'tool-1', title: privateText, status: 'pending', rawInput: { text: privateText } },
@@ -125,6 +136,7 @@ createInterface({ input: process.stdin }).on('line', line => {
       if (startup === 'deny-load' || !store || !existsSync(store)) return error(id, -32602);
       ({ sessionId, model, messages } = JSON.parse(readFileSync(store, 'utf8')));
       if (params?.sessionId !== sessionId) return error(id, -32602);
+      if (startup === 'gated-deny-load') return gate('load', () => error(id, -32602));
       const replay = () => {
         for (const { text, role, messageId } of messages) {
           const mid = Math.ceil(text.length / 2);

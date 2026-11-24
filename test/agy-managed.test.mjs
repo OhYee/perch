@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -69,10 +69,13 @@ async function fixture(t, startup = '') {
       return data.slice(0, data.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(JSON.parse);
     } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
   };
-  const run = (args, input, overrides) => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cli, ...args], { cwd, env: { ...env, ...overrides }, timeout: 40000 });
+  const run = (args, input, overrides, untilText) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], { cwd, env: { ...env, ...overrides }, timeout: untilText ? 5000 : 40000 });
     let stdout = '', stderr = '';
-    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+    child.stdout.setEncoding('utf8').on('data', chunk => {
+      stdout += chunk;
+      if (untilText && stdout.includes(untilText)) child.kill();
+    });
     child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
     child.on('error', reject);
     child.stdin.on('error', error => { if (error.code !== 'EPIPE') reject(error); });
@@ -300,6 +303,45 @@ test('AGY startup failures never advertise an empty session or leave a provider 
   }
 });
 
+test('AGY rejects a writable or symlinked state root and accepts a separate private XDG_STATE_HOME', async t => {
+  const f = await fixture(t);
+  const startArgs = ['start', 'agy', '--json'];
+  const check = async overrides => {
+    const result = await f.run(startArgs, undefined, overrides);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /XDG_STATE_HOME.*0700.*symlink/);
+    assert.deepEqual(await f.trace(), []);
+  };
+  await mkdir(f.state, { recursive: true });
+  await chmod(f.state, 0o775);
+  await check({ XDG_STATE_HOME: undefined });
+  assert.equal((await lstat(f.state)).mode & 0o777, 0o775);
+  assert.deepEqual(await readdir(f.state), []);
+  await rmdir(f.state);
+
+  const target = join(f.home, 'symlink-target');
+  await mkdir(target, { mode: 0o700 });
+  await symlink(target, f.state);
+  await check();
+  assert.ok((await lstat(f.state)).isSymbolicLink());
+  assert.deepEqual(await readdir(target), []);
+
+  const privateState = join(f.home, 'perch-state');
+  await mkdir(privateState, { mode: 0o700 });
+  const env = { XDG_STATE_HOME: privateState };
+  const created = await f.run(startArgs, undefined, env);
+  assert.equal(created.status, 0, created.stderr);
+  const { id } = json(created);
+  try {
+    assert.deepEqual(json(await f.run(['list', '--provider', 'agy', '--json'], undefined, env)).map(row => row.id), [id]);
+    assert.equal((await lstat(join(privateState, 'agent-session', 'agy', id.slice(4), 'session.json'))).mode & 0o777, 0o600);
+  } finally {
+    const closed = await f.run(['close', id, '--json'], undefined, env);
+    assert.equal(closed.status, 0, closed.stderr);
+  }
+});
+
 test('AGY private rendezvous rejects other homes, symlinks and an unready endpoint before sending text', async t => {
   const f = await fixture(t);
   const row = await f.start();
@@ -356,6 +398,109 @@ test('AGY private rendezvous rejects other homes, symlinks and an unready endpoi
 
 const descriptorPath = (f, row) => join(f.state, 'agent-session', 'agy', row.id.slice('agy:'.length), 'session.json');
 const resumeArgs = id => ['resume', id, '--json'];
+
+async function seedReplay(f, messages) {
+  // 仅替换合成提供方的存储，保留真实的 start/close/ACP load 路径。
+  const path = join(f.home, 'fixture-state');
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  await writeFile(path, JSON.stringify({ ...saved, messages }));
+}
+
+test('AGY restores a bounded message tail without reviving earlier IDs from delayed fragments', async t => {
+  const f = await fixture(t);
+  const row = await f.start();
+  await close(row);
+  const messages = Array.from({ length: 1200 }, (_, i) => ({
+    role: i % 2 ? 'agent_message_chunk' : 'user_message_chunk', text: `message ${i}`, messageId: `message-${i}`,
+  }));
+  await seedReplay(f, [...messages,
+    { role: 'user_message_chunk', text: 'tail ', messageId: 'tail' },
+    { role: 'agent_message_chunk', text: 'complete answer', messageId: 'answer' },
+    { ...messages[0], text: 'late incomplete fragment' },
+    { role: 'user_message_chunk', text: 'user', messageId: 'tail' },
+  ]);
+  const reopened = await f.run(resumeArgs(row.id));
+  assert.equal(reopened.status, 0, reopened.stderr);
+  assert.equal(json(reopened).id, row.id);
+  const live = f.own(await lookupBridge(row.id));
+  const history = await historyManaged(live, 1024);
+  assert.equal(history.length, 1024);
+  assert.equal(history[0].text, 'message 178');
+  assert.deepEqual(history.slice(-2), [
+    { role: 'user', text: 'tail user' }, { role: 'assistant', text: 'complete answer' },
+  ]);
+  await assert.rejects(historyManaged(live, Infinity), /exceeds the retained window/);
+  await send(live, 'continue after count eviction');
+  assert.equal((await waitIdle(live, 1000)).status, 'completed');
+  assert.deepEqual((await historyManaged(live, 2))[0], { role: 'user', text: 'continue after count eviction' });
+});
+
+test('AGY can resume and read a short retained tail from a byte-limited replay', async t => {
+  const f = await fixture(t);
+  const row = await f.start();
+  await close(row);
+  const messages = Array.from({ length: 5 }, (_, i) => ({
+    role: i % 2 ? 'agent_message_chunk' : 'user_message_chunk', text: String(i).repeat(1024 * 1024), messageId: `payload-${i}`,
+  }));
+  await seedReplay(f, messages);
+  const reopened = await f.run(resumeArgs(row.id));
+  assert.equal(reopened.status, 0, reopened.stderr);
+  assert.equal(json(reopened).id, row.id);
+  const live = f.own(await lookupBridge(row.id));
+  const retained = await f.run(['history', live.id, '--json']);
+  assert.equal(retained.status, 0, retained.stderr);
+  assert.deepEqual(json(retained).map(({ role, text }) => [role, text[0], text.length]), [
+    ['assistant', '1', 1024 * 1024], ['user', '2', 1024 * 1024],
+    ['assistant', '3', 1024 * 1024], ['user', '4', 1024 * 1024],
+  ]);
+  const all = await f.run(['history', live.id, '--all', '--json']);
+  assert.equal(all.status, 1);
+  assert.equal(all.stdout, '');
+  assert.match(all.stderr, /exceeds the retained window/);
+  await send(live, 'continue after byte eviction');
+  assert.equal((await waitIdle(live, 1000)).status, 'completed');
+  assert.deepEqual((await historyManaged(live, 2))[0], { role: 'user', text: 'continue after byte eviction' });
+});
+
+test('AGY omits entire oversized messages from live and replay history', async t => {
+  const f = await fixture(t);
+  const row = await f.start();
+  await send(row, 'fixture:oversized');
+  const [streaming] = await historyManaged(row, 1);
+  assert.equal(streaming.role, 'assistant');
+  assert.equal(streaming.text.length, 2 * 1024 * 1024 + 1);
+  await f.release('finish');
+  assert.deepEqual(await waitIdle(row, 5000), { status: 'failed', error: 'Antigravity CLI truncated the response' });
+  assert.deepEqual(await historyManaged(row, 20), [
+    { role: 'user', text: 'fixture:oversized' }, { role: 'assistant', text: 'complete after oversized message' },
+  ]);
+  await assert.rejects(historyManaged(row, Infinity), /exceeds the retained window/);
+  await close(row);
+
+  const text = 'y'.repeat(4 * 1024 * 1024 + 2);
+  await seedReplay(f, [
+    { role: 'user_message_chunk', text: 'earlier question', messageId: 'question' },
+    { role: 'agent_message_chunk', text, messageId: 'oversized' },
+    { role: 'agent_message_chunk', text: 'late incomplete fragment', messageId: 'oversized' },
+    { role: 'user_message_chunk', text: 'anonymous question' },
+    { role: 'agent_message_chunk', text },
+    { role: 'agent_message_chunk', text: 'delayed tagged fragment', messageId: 'oversized' },
+    { role: 'agent_message_chunk', text: 'late anonymous fragment' },
+    { role: 'user_message_chunk', text: 'following question' },
+    { role: 'agent_message_chunk', text: 'following complete answer' },
+  ]);
+  const reopened = await f.run(resumeArgs(row.id));
+  assert.equal(reopened.status, 0, reopened.stderr);
+  const live = f.own(await lookupBridge(row.id));
+  assert.deepEqual(await historyManaged(live, 20), [
+    { role: 'user', text: 'earlier question' }, { role: 'user', text: 'anonymous question' },
+    { role: 'user', text: 'following question' }, { role: 'assistant', text: 'following complete answer' },
+  ]);
+  await assert.rejects(historyManaged(live, Infinity), /exceeds the retained window/);
+  const view = await f.run(['view', live.id], undefined, undefined, 'following complete answer');
+  assert.match(view.stdout, /following complete answer/);
+  assert.doesNotMatch(view.stdout + view.stderr, /fragment|exceeds the retained window/);
+});
 
 test('concurrent AGY resume shares one owned load, restores exact history and fences old requests', async t => {
   const f = await fixture(t);
@@ -419,6 +564,43 @@ test('concurrent AGY resume shares one owned load, restores exact history and fe
   await f.release('finish');
   await sending;
   assert.equal((await waitIdle(reopened, 1000)).status, 'completed');
+});
+
+test('a contending AGY resume reports the failed startup without claiming a live owner', { timeout: 12000 }, async t => {
+  const f = await fixture(t);
+  const row = await f.start();
+  await close(row);
+  const offset = (await f.trace()).length;
+  const first = observe(f.run(resumeArgs(row.id), undefined, { AGY_FIXTURE_START: 'gated-deny-load' }));
+  await until(async () => methods((await f.trace()).slice(offset)).includes('session/load'));
+  const contention = join(f.home, 'contender-saw-lock');
+  // 观察真实的启动 IPC；只有第二个桥接确实撞上锁后才让原持锁者失败。
+  const observeContention = `import { writeFileSync } from 'node:fs';
+    const send = process.send;
+    if (send) process.send = function (message, ...args) {
+      if (message?.error === 'Antigravity CLI managed session is starting or closing') writeFileSync(${JSON.stringify(contention)}, '');
+      return send.call(this, message, ...args);
+    };`;
+  const second = observe(f.run(resumeArgs(row.id), undefined, {
+    NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(observeContention)}`,
+  }));
+  try {
+    await until(() => lstat(contention).catch(error => { if (error.code !== 'ENOENT') throw error; }));
+  } finally { await f.release('load'); }
+  const [failed, contending] = await Promise.all([first, second]);
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /could not load/);
+  assert.equal(contending.status, 1);
+  assert.equal(contending.stdout, '');
+  assert.match(contending.stderr, /did not become ready; retry resume/);
+  assert.doesNotMatch(contending.stderr, /already has an owner/);
+  const trace = (await f.trace()).slice(offset);
+  assert.equal(trace.filter(m => m.argv).length, 1);
+  assert.deepEqual(methods(trace), ['initialize', 'session/load']);
+  assert.equal(await lookupBridge(row.id), null);
+  const later = await f.run(resumeArgs(row.id));
+  assert.equal(later.status, 0, later.stderr);
+  f.own(await lookupBridge(row.id));
 });
 
 test('AGY resume rejects unowned descriptors and fails closed on unsupported or refused load', async t => {
