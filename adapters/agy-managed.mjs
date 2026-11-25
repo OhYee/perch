@@ -9,7 +9,8 @@ import { launchBridge } from './launch.mjs';
 
 export const MiB = 1024 * 1024;
 export const protocolVersion = 1;
-export const admissionMs = 10000;
+const rawAdmissionMs = Number(process.env.PERCH_AGY_ADMISSION_MS);
+export const admissionMs = Number.isSafeInteger(rawAdmissionMs) && rawAdmissionMs >= 500 && rawAdmissionMs <= 120000 ? rawAdmissionMs : 45000;
 export const maxWaitMs = 86400000;
 // JSON 可把 1 MiB 的原文扩展到 6 MiB；IPC 限额须包含转义后的正文。
 export const requestBytes = 6 * MiB + 4096;
