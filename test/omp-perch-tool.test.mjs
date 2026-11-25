@@ -28,7 +28,10 @@ process.stdin.on('end', () => {
   if (log) appendFileSync(log, JSON.stringify({ args, stdin }) + '\\n');
   const cmd = args[0];
   if (cmd === 'list') {
-    console.log(JSON.stringify([{ id: 'agy:11111111-1111-4111-8111-111111111111', provider: 'agy', status: 'idle' }]));
+    console.log(JSON.stringify([
+      { id: 'agy:11111111-1111-4111-8111-111111111111', provider: 'agy', status: 'running', cwd: '/work' },
+      { id: 'omp:22222222-2222-4222-8222-222222222222', provider: 'omp', status: 'idle', cwd: '/other-terminal' },
+    ]));
     return;
   }
   if (cmd === 'start') {
@@ -111,7 +114,7 @@ function createHarness(dir) {
   return { handlers, tools, sentMessages, ctx, getActiveTools: () => activeTools };
 }
 
-test('OMP extension registers perch tool, activates it in vibe mode, pushes async completion and cleans up on shutdown', async () => {
+test('OMP extension registers perch tool, tracks ledger with name/owned, pushes async completion and cleans up on shutdown', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'perch-omp-tool-'));
   const bin = join(dir, 'fake-perch');
   const logPath = join(dir, 'calls.jsonl');
@@ -120,30 +123,45 @@ test('OMP extension registers perch tool, activates it in vibe mode, pushes asyn
     PERCH_BIN: process.env.PERCH_BIN,
     PERCH_FIXTURE_LOG: process.env.PERCH_FIXTURE_LOG,
     PERCH_FIXTURE_RELEASE: process.env.PERCH_FIXTURE_RELEASE,
+    PERCH_HEARTBEAT_MS: process.env.PERCH_HEARTBEAT_MS,
   };
   await writeFile(bin, fakePerchScript);
   await chmod(bin, 0o700);
   process.env.PERCH_BIN = bin;
   process.env.PERCH_FIXTURE_LOG = logPath;
   process.env.PERCH_FIXTURE_RELEASE = releasePath;
+  process.env.PERCH_HEARTBEAT_MS = '0';
 
   const h = createHarness(dir);
   try {
     const perch = h.tools.get('perch');
     assert.ok(perch, 'perch tool must be registered');
+    assert.equal(h.handlers.get('context')({ messages: [] }, h.ctx), undefined, 'idle ledger injects nothing');
 
     await h.handlers.get('mode_changed')({ state: { vibe: { status: 'active' } } }, h.ctx);
     assert.ok(h.getActiveTools().includes('perch'), 'perch tool must be activated in vibe mode');
 
     const started = await perch.execute('t1', {
       op: 'start',
+      name: 'investigate-bug',
       provider: 'agy',
-      model: 'gemini-4-neon-high',
+      model: 'gemini-4-neon',
       prompt: 'Investigate the root cause\nwith details',
     }, undefined, undefined, h.ctx);
     assert.equal(started.details.id, 'agy:11111111-1111-4111-8111-111111111111');
+    assert.equal(started.details.name, 'investigate-bug');
     assert.equal(started.details.accepted, true);
     assert.equal(started.details.notify, true);
+
+    const runningLedger = h.handlers.get('context')({ messages: [] }, h.ctx);
+    assert.ok(runningLedger, 'running task must appear in context ledger');
+    assert.match(runningLedger.messages[0].content, /investigate-bug/);
+    assert.match(runningLedger.messages[0].content, /running/);
+
+    const ownedList = await perch.execute('t1b', { op: 'list', owned: true }, undefined, undefined, h.ctx);
+    assert.equal(ownedList.details.length, 1, 'owned=true excludes foreign terminal sessions');
+    assert.equal(ownedList.details[0].name, 'investigate-bug');
+    assert.equal(ownedList.details[0].state, 'running');
 
     const instantWait = await perch.execute('t2', { op: 'wait', id: started.details.id, timeout: 0 }, undefined, undefined, h.ctx);
     assert.deepEqual(instantWait.details, { id: started.details.id, status: 'timeout' });
@@ -155,22 +173,79 @@ test('OMP extension registers perch tool, activates it in vibe mode, pushes asyn
     const pushed = h.sentMessages[0];
     assert.deepEqual(pushed.options, { triggerTurn: true, deliverAs: 'followUp' });
     assert.equal(pushed.message.customType, 'perch-worker-event');
+    assert.match(pushed.message.content, /investigate-bug/);
     assert.match(pushed.message.content, /agy:11111111-1111-4111-8111-111111111111/);
-    assert.match(pushed.message.content, /gemini-4-neon-high/);
+    assert.match(pushed.message.content, /gemini-4-neon/);
     assert.match(pushed.message.content, /Status: completed/);
     assert.match(pushed.message.content, /Root cause found in adapter\.mjs:42/);
 
-    const history = await perch.execute('t3', { op: 'history', id: started.details.id, limit: 2 }, undefined, undefined, h.ctx);
-    assert.equal(history.details.length, 2);
+    // Completed task stays UNHANDLED in ledger if the turn aborts or errors.
+    const unhandledLedger = h.handlers.get('context')({ messages: [] }, h.ctx);
+    assert.match(unhandledLedger.messages[0].content, /UNHANDLED/);
+    h.handlers.get('message_end')({ message: { role: 'assistant', stopReason: 'aborted' } }, h.ctx);
+    const stillUnhandled = h.handlers.get('context')({ messages: [] }, h.ctx);
+    assert.match(stillUnhandled.messages[0].content, /UNHANDLED/);
 
-    const listed = await perch.execute('t4', { op: 'list', provider: 'agy' }, undefined, undefined, h.ctx);
-    assert.equal(listed.details.length, 1);
+    // Clean stop acknowledges the ledger entry.
+    h.handlers.get('message_end')({ message: { role: 'assistant', stopReason: 'stop' } }, h.ctx);
+    assert.equal(h.handlers.get('context')({ messages: [] }, h.ctx), undefined);
+
+    const allListed = await perch.execute('t4', { op: 'list' }, undefined, undefined, h.ctx);
+    assert.equal(allListed.details.length, 2);
+    assert.equal(allListed.details[0].owned, true);
+    assert.equal(allListed.details[0].name, 'investigate-bug');
+    assert.equal(allListed.details[1].owned, undefined);
 
     await h.handlers.get('session_shutdown')({}, h.ctx);
     const calls = (await readFile(logPath, 'utf8')).trim().split('\n').map(JSON.parse);
-    assert.ok(calls.some(c => c.args[0] === 'start' && c.args.includes('--model') && c.args.includes('gemini-4-neon-high')));
+    assert.ok(calls.some(c => c.args[0] === 'start' && c.args.includes('--model') && c.args.includes('gemini-4-neon')));
     assert.ok(calls.some(c => c.args[0] === 'send' && c.args.includes('--stdin') && c.stdin === 'Investigate the root cause\nwith details'));
     assert.ok(calls.some(c => c.args[0] === 'close' && c.args[1] === started.details.id), 'session_shutdown must close owned managed sessions');
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('OMP perch extension sends periodic heartbeat while long-running task is still active', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'perch-omp-heartbeat-'));
+  const bin = join(dir, 'fake-perch');
+  const releasePath = join(dir, 'release');
+  const previous = {
+    PERCH_BIN: process.env.PERCH_BIN,
+    PERCH_FIXTURE_RELEASE: process.env.PERCH_FIXTURE_RELEASE,
+    PERCH_HEARTBEAT_MS: process.env.PERCH_HEARTBEAT_MS,
+  };
+  await writeFile(bin, fakePerchScript);
+  await chmod(bin, 0o700);
+  process.env.PERCH_BIN = bin;
+  process.env.PERCH_FIXTURE_RELEASE = releasePath;
+  process.env.PERCH_HEARTBEAT_MS = '80';
+
+  const h = createHarness(dir);
+  try {
+    const perch = h.tools.get('perch');
+    await perch.execute('t1', {
+      op: 'start',
+      name: 'slow-design',
+      provider: 'agy',
+      model: 'gemini-4-neon',
+      prompt: 'Design carefully',
+    }, undefined, undefined, h.ctx);
+
+    await until(() => h.sentMessages.some(m => m.message.customType === 'perch-worker-heartbeat'));
+    const hb = h.sentMessages.find(m => m.message.customType === 'perch-worker-heartbeat');
+    assert.deepEqual(hb.options, { triggerTurn: true, deliverAs: 'followUp' });
+    assert.match(hb.message.content, /\[Perch heartbeat\]/);
+    assert.match(hb.message.content, /slow-design/);
+    assert.match(hb.message.content, /check #1/);
+
+    await writeFile(releasePath, 'go');
+    await until(() => h.sentMessages.some(m => m.message.customType === 'perch-worker-event'));
+    await h.handlers.get('session_shutdown')({}, h.ctx);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -187,11 +262,13 @@ test('OMP perch extension cancels pending async watchers across session switch',
   const previous = {
     PERCH_BIN: process.env.PERCH_BIN,
     PERCH_FIXTURE_RELEASE: process.env.PERCH_FIXTURE_RELEASE,
+    PERCH_HEARTBEAT_MS: process.env.PERCH_HEARTBEAT_MS,
   };
   await writeFile(bin, fakePerchScript);
   await chmod(bin, 0o700);
   process.env.PERCH_BIN = bin;
   process.env.PERCH_FIXTURE_RELEASE = releasePath;
+  process.env.PERCH_HEARTBEAT_MS = '0';
 
   const h = createHarness(dir);
   try {
@@ -207,6 +284,22 @@ test('OMP perch extension cancels pending async watchers across session switch',
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('OMP extension hides perch tool inside managed PERCH_MANAGED_WORKER sessions', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'perch-omp-worker-guard-'));
+  const previous = process.env.PERCH_MANAGED_WORKER;
+  process.env.PERCH_MANAGED_WORKER = '1';
+  try {
+    const h = createHarness(dir);
+    assert.equal(h.tools.has('perch'), false, 'managed worker must not register perch tool');
+    await h.handlers.get('mode_changed')({ state: { vibe: { status: 'active' } } }, h.ctx);
+    assert.equal(h.getActiveTools().includes('perch'), false, 'managed worker must not activate perch tool in vibe mode');
+  } finally {
+    if (previous === undefined) delete process.env.PERCH_MANAGED_WORKER;
+    else process.env.PERCH_MANAGED_WORKER = previous;
     await rm(dir, { recursive: true, force: true });
   }
 });
