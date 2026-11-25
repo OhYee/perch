@@ -27,6 +27,7 @@ if (name === 'ps') {
   if (!process.env.FAKE_TMUX) process.exit(1);
   console.log('%1|11|/dev/test0|0|' + (process.env.COPY_MODE || '0'));
 } else if (name === 'tern' && args[0] === 'ls') {
+  if (process.env.NO_TERN) process.exit(1);
   const blocks = [{id:10,live:true,program:'bash'}];
   if (process.env.EXTRA_NULL) blocks.push({id:12,live:true,program:'bash'});
   console.log(JSON.stringify({sessions:[{tabs:[{blocks}]}]}));
@@ -35,12 +36,20 @@ if (name === 'ps') {
   let n = 0; try { n = Number(fs.readFileSync(process.env.COUNT)); } catch {}
   fs.writeFileSync(process.env.COUNT, String(++n));
   console.log(JSON.stringify({pane:10,child:{pid:11},foreground:{pid:process.env.CHANGE_FOREGROUND && n > 1 ? 9999 : 4242}}));
+} else if (name === 'herdr' && args[0] === 'pane' && args[1] === 'list') {
+  if (!process.env.FAKE_HERDR) process.exit(1);
+  console.log(JSON.stringify({result:{panes:[{pane_id:'w1:p1'}]}}));
+} else if (name === 'herdr' && args[0] === 'pane' && args[1] === 'process-info') {
+  let n = 0; try { n = Number(fs.readFileSync(process.env.COUNT)); } catch {}
+  fs.writeFileSync(process.env.COUNT, String(++n));
+  const fgPid = process.env.CHANGE_FOREGROUND && n > 1 ? 9999 : 4242;
+  console.log(JSON.stringify({result:{process_info:{pane_id:'w1:p1',foreground_process_group_id:4242,foreground_processes:[{pid:fgPid}]}}}));
 } else {
   fs.appendFileSync(process.env.LOG, JSON.stringify([name,...args]) + '\\n');
-  if (process.env.FAIL_ENTER && (args.includes('Enter'))) process.exit(1);
+  if (process.env.FAIL_ENTER && (args.includes('Enter') || args.includes('enter'))) process.exit(1);
 }
 `;
-  for (const name of ['ps', 'tern', 'tmux']) await writeFile(join(dir, name), fake, { mode: 0o755 });
+  for (const name of ['ps', 'tern', 'tmux', 'herdr']) await writeFile(join(dir, name), fake, { mode: 0o755 });
   const env = { HOME: dir, PATH: dir, LOG: log, COUNT: count, ...options };
   const run = async ({ mode = 'text', text = 'secret $(unsafe)', enter = false, confirmFailure = false } = {}) => {
     const script = `import { sendTerminalInput } from ${JSON.stringify(moduleUrl)};
@@ -117,4 +126,22 @@ test('ignores an unrelated Tern block with no foreground process', async t => {
   const result = await f.run();
   assert.equal(result.ok, true);
   assert.deepEqual(await f.commands(), [['tern', 'send', '10', 'text', 'secret $(unsafe)']]);
+});
+
+test('Herdr sends literal text and keys after verifying the foreground process', async t => {
+  const f = await fixture(t, { NO_TERN: '1', FAKE_HERDR: '1' });
+  const result = await f.run({ text: 'hello herdr', enter: true });
+  assert.equal(result.ok, true);
+  assert.deepEqual(await f.commands(), [
+    ['herdr', 'pane', 'send-text', 'w1:p1', 'hello herdr'],
+    ['herdr', 'pane', 'send-keys', 'w1:p1', 'enter'],
+  ]);
+});
+
+test('refuses changed Herdr foreground before writing any input', async t => {
+  const f = await fixture(t, { NO_TERN: '1', FAKE_HERDR: '1', CHANGE_FOREGROUND: '1' });
+  const result = await f.run();
+  assert.equal(result.ok, false);
+  assert.equal(result.unknown, false);
+  assert.deepEqual(await f.commands(), []);
 });

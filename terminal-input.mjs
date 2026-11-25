@@ -2,13 +2,19 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
-// Without extended-key negotiation both backends can collapse Ctrl+Enter into Enter.
+// Without extended-key negotiation backends can collapse Ctrl+Enter into Enter.
 const ctrlEnter = '\x1b[13;5u';
 const keys = {
-  enter: ['Enter', 'Enter'], escape: ['Escape', 'Escape'], tab: ['Tab', 'Tab'],
-  backspace: ['Backspace', 'BSpace'], up: ['ArrowUp', 'Up'], down: ['ArrowDown', 'Down'],
-  left: ['ArrowLeft', 'Left'], right: ['ArrowRight', 'Right'],
-  'ctrl+q': ['Ctrl+q', 'C-q'], 'ctrl+enter': [ctrlEnter, ctrlEnter],
+  enter: ['Enter', 'Enter', 'enter'],
+  escape: ['Escape', 'Escape', 'esc'],
+  tab: ['Tab', 'Tab', 'tab'],
+  backspace: ['Backspace', 'BSpace', 'backspace'],
+  up: ['ArrowUp', 'Up', 'up'],
+  down: ['ArrowDown', 'Down', 'down'],
+  left: ['ArrowLeft', 'Left', 'left'],
+  right: ['ArrowRight', 'Right', 'right'],
+  'ctrl+q': ['Ctrl+q', 'C-q', 'ctrl+q'],
+  'ctrl+enter': [ctrlEnter, ctrlEnter, ctrlEnter],
 };
 export const supportedTerminalKeys = Object.freeze(Object.keys(keys));
 
@@ -57,6 +63,27 @@ async function ternProcess(id) {
   return data;
 }
 
+async function herdrPanes() {
+  const data = JSON.parse(await command('herdr', ['pane', 'list']));
+  const panes = data?.result?.panes;
+  if (!Array.isArray(panes)) throw Error('invalid Herdr listing');
+  return panes.map(pane => {
+    if (typeof pane?.pane_id !== 'string' || !pane.pane_id) throw Error('invalid Herdr pane');
+    return pane.pane_id;
+  });
+}
+
+async function herdrProcess(id) {
+  const data = JSON.parse(await command('herdr', ['pane', 'process-info', '--pane', id]));
+  const info = data?.result?.process_info;
+  if (!info || info.pane_id !== id || !Array.isArray(info.foreground_processes)) throw Error('invalid Herdr process');
+  return info;
+}
+
+function herdrMatches(info, pid, pgid) {
+  return info.foreground_process_group_id === pgid && info.foreground_processes.some(proc => proc?.pid === pid);
+}
+
 async function findTarget(pid) {
   const process = await processInfo(pid);
   if (process.pgid <= 0 || process.pgid !== process.tpgid) throw Error('not foreground');
@@ -72,11 +99,19 @@ async function findTarget(pid) {
     if (owner.tty !== pane.tty || owner.tpgid !== process.pgid) throw Error('tmux pane mismatch');
     return { backend: 'tmux', id: pane.id, panePid: pane.pid, tty: pane.tty };
   }
-  const blocks = await ternBlocks();
-  const results = await Promise.all(blocks.map(async id => ({ id, process: await ternProcess(id) })));
-  const found = results.filter(row => row.process.foreground?.pid === pid);
-  if (found.length !== 1) throw Error('Tern block unavailable or ambiguous');
-  return { backend: 'tern', id: found[0].id };
+  let blocks;
+  try { blocks = await ternBlocks(); } catch { blocks = null; }
+  if (blocks) {
+    const results = await Promise.all(blocks.map(async id => ({ id, process: await ternProcess(id) })));
+    const found = results.filter(row => row.process.foreground?.pid === pid);
+    if (found.length === 1) return { backend: 'tern', id: found[0].id };
+    if (found.length > 1) throw Error('Tern block ambiguous');
+  }
+  const herdrIds = await herdrPanes();
+  const herdrResults = await Promise.all(herdrIds.map(async id => ({ id, info: await herdrProcess(id) })));
+  const herdrFound = herdrResults.filter(row => herdrMatches(row.info, pid, process.pgid));
+  if (herdrFound.length !== 1) throw Error('Terminal pane unavailable or ambiguous');
+  return { backend: 'herdr', id: herdrFound[0].id };
 }
 
 async function recheck(target, pid) {
@@ -86,6 +121,10 @@ async function recheck(target, pid) {
     if ((await ternProcess(target.id)).foreground?.pid !== pid) throw Error('foreground changed');
     return;
   }
+  if (target.backend === 'herdr') {
+    if (!herdrMatches(await herdrProcess(target.id), pid, process.pgid)) throw Error('Herdr foreground changed');
+    return;
+  }
   if (pid !== process.tpgid) throw Error('tmux foreground is not the target process');
   const panes = (await tmuxPanes()).filter(pane => pane.id === target.id || pane.tty === target.tty);
   if (panes.length !== 1) throw Error('tmux pane changed');
@@ -93,6 +132,10 @@ async function recheck(target, pid) {
   if (pane.id !== target.id || pane.pid !== target.panePid || pane.tty !== target.tty || pane.tty !== process.tty || pane.dead || pane.inMode) throw Error('tmux pane changed');
   const owner = await processInfo(pane.pid);
   if (owner.tty !== pane.tty || owner.tpgid !== process.pgid) throw Error('tmux foreground changed');
+}
+
+function keyIndex(backend) {
+  return backend === 'tern' ? 0 : backend === 'tmux' ? 1 : 2;
 }
 
 // Success means the terminal acknowledged input, not that the application accepted it.
@@ -109,14 +152,16 @@ export async function sendTerminalInput({ pid, mode, text, enter, confirm, lang 
       await confirm();
       attempted = true;
       if (target.backend === 'tern') await command('tern', ['send', target.id, kind === 'text' ? 'text' : 'keys', value]);
+      else if (target.backend === 'herdr') await command('herdr', ['pane', kind === 'text' ? 'send-text' : 'send-keys', target.id, value]);
       else if (kind === 'text') await command('tmux', ['-N', 'send-keys', '-t', target.id, '-l', '--', value]);
       else await command('tmux', ['-N', 'send-keys', '-t', target.id, value]);
     };
+    const idx = keyIndex(target.backend);
     if (mode === 'text') {
       await mutate('text', text);
-      if (enter) await mutate('key', keys.enter[target.backend === 'tern' ? 0 : 1]);
+      if (enter) await mutate('key', keys.enter[idx]);
     } else {
-      const value = key[target.backend === 'tern' ? 0 : 1];
+      const value = key[idx];
       await mutate(value === ctrlEnter ? 'text' : 'key', value);
     }
   } catch {
