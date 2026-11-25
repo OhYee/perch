@@ -94,6 +94,7 @@ const chinese = new Map(Object.entries({
   'AGY native sessions are report-only; use the original terminal': 'agy 原生会话只报告身份；请在原终端交互',
   'AGY native history is unavailable: the current transcript could not be verified': '无法读取 agy 原生会话历史：无法验证当前会话记录',
   'AGY status line callback refused: expected the fixed command in a live native TUI': 'agy 状态行回调已拒绝：需要由活动的原生 TUI 执行固定命令',
+  'AGY hook callback refused: expected a hook invoked by a live native TUI': 'agy hook 回调已拒绝：需要由活动的原生 TUI 调用',
   'AGY status line callback refused: private report storage unavailable': 'agy 状态行回调已拒绝：私有报告目录不可用',
   'Perch: AGY conversation observed': 'Perch：已识别 agy 对话',
   'Perch: AGY conversation unavailable': 'Perch：当前 agy 对话不可用',

@@ -15,6 +15,7 @@ const nativeIdentityUnavailable = 'AGY native session identity is unavailable; t
 const nativeHistoryUnavailable = 'AGY native history is unavailable: the current transcript could not be verified';
 const nativeInputUnavailable = 'AGY native input is unavailable: the status line does not prove the editor can accept input safely';
 const callbackRefused = 'AGY status line callback refused: expected the fixed command in a live native TUI';
+const hookCallbackRefused = 'AGY hook callback refused: expected a hook invoked by a live native TUI';
 const storageUnavailable = 'AGY status line callback refused: private report storage unavailable';
 const hintOnly = 'AGY native sessions are report-only; use the original terminal';
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -22,11 +23,14 @@ const conversationId = new RegExp(`^${uuid}$`, 'u');
 const nativeId = new RegExp(`^agy:native-([1-9]\\d{0,9})\\.([0-9a-f]{16})-${uuid}$`, 'u');
 const receiptName = /^pid-([1-9]\d{0,9})\.json$/u;
 const reportLimit = 4096;
+const transcriptLimit = 32 * 1024 * 1024;
 const observeMs = 850;
 const statuses = new Set(['unknown', 'idle', 'running', 'blocked', 'failed']);
+const hookEvents = new Set(['SessionStart', 'PreInvocation', 'Stop']);
 const processId = /^agy:pid-([1-9]\d{0,9})$/u;
 const withValue = new Set(['--add-dir', '--agent', '--conversation', '--effort', '--log-file', '--mode', '--model', '--prompt-interactive', '--resume', '--settings', '-i', '-r']);
-const switches = new Set(['--continue', '--sandbox', '-c']);
+const switches = new Set(['--continue', '--dangerously-skip-permissions', '--sandbox', '-c']);
+const userRequestTag = /<USER_REQUEST>\r?\n?([\s\S]*?)\r?\n?<\/USER_REQUEST>/u;
 
 function interactiveArgs(argv) {
   if (!Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string')) return false;
@@ -245,18 +249,113 @@ function safeTitle(value) {
   return typeof value === 'string' && value.length <= 256 && value.trim() && !/[\x00-\x1f\x7f-\x9f\u2028-\u202e\u2066-\u2069]/u.test(value) ? value : null;
 }
 
+async function parentPid(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return 0;
+  if (process.platform === 'darwin') {
+    const raw = (await command('/bin/ps', ['-p', String(pid), '-o', 'uid=,ppid=']).catch(() => '')).trim();
+    const match = /^(\d+)\s+(\d+)$/u.exec(raw);
+    return match && Number(match[1]) === uid ? Number(match[2]) : 0;
+  }
+  if (process.platform === 'linux') {
+    try {
+      const dir = `/proc/${pid}`;
+      if (Number((await stat(dir)).uid) !== uid) return 0;
+      const text = await readFile(join(dir, 'stat'), 'utf8');
+      const fields = text.slice(text.lastIndexOf(') ') + 2).trim().split(/\s+/u);
+      const ppid = Number(fields[1]);
+      return Number.isSafeInteger(ppid) && ppid > 0 ? ppid : 0;
+    } catch { return 0; }
+  }
+  return 0;
+}
+
+async function inspectHookSourceWith(inspect) {
+  let candidate = process.ppid;
+  for (let hop = 0; hop < 4 && candidate > 1; hop++) {
+    const rows = await inspect(candidate).catch(() => []);
+    const match = rows.find(row => interactive(row) && row.pid === candidate);
+    if (match) return match;
+    candidate = await parentPid(candidate);
+  }
+  return undefined;
+}
+
+function validTranscriptPath(id, candidate) {
+  if (typeof id !== 'string' || !conversationId.test(id) || typeof candidate !== 'string' || !isAbsolute(candidate)) return null;
+  const gemini = join(resolve(homedir()), '.gemini');
+  for (const app of ['antigravity-cli', 'antigravity', 'antigravity-ide']) {
+    const expected = join(gemini, app, 'brain', id, '.system_generated', 'logs', 'transcript.jsonl');
+    if (candidate === expected) return expected;
+  }
+  return null;
+}
+
+async function sameDirectory(a, b) {
+  if (!a || !b || typeof a !== 'string' || typeof b !== 'string' || !isAbsolute(a) || !isAbsolute(b)) return false;
+  if (a === b) return true;
+  try {
+    return await realpath(a) === await realpath(b);
+  } catch {
+    return false;
+  }
+}
+
+export function parseAgyTranscript(text, limit = 20) {
+  const messages = [];
+  for (const rawLine of String(text ?? '').split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.type === 'USER_INPUT' && entry.source === 'USER_EXPLICIT' && typeof entry.content === 'string') {
+      const match = userRequestTag.exec(entry.content);
+      const body = (match ? match[1] : entry.content).trim();
+      if (body) messages.push({ role: 'user', text: body });
+    } else if (entry.type === 'PLANNER_RESPONSE' && typeof entry.content === 'string') {
+      const body = entry.content.trim();
+      if (body) messages.push({ role: 'assistant', text: body });
+    }
+  }
+  return Number.isFinite(limit) ? messages.slice(-limit) : messages;
+}
+
 function reportFrom(input, row, observedAt) {
   const id = input?.conversation_id;
-  const transcript = typeof id === 'string' && conversationId.test(id)
-    ? join(resolve(homedir()), '.gemini', 'antigravity', 'brain', id, '.system_generated', 'logs', 'transcript.jsonl') : null;
+  const transcript = validTranscriptPath(id, input?.transcript_path);
   const valid = transcript !== null && input.product === 'antigravity' && input.version === '1.5.16'
-    && id === input.session_id && row.cwd && input.cwd === row.cwd && input.transcript_path === transcript;
+    && id === input.session_id && row.cwd && input.cwd === row.cwd;
   const nativeState = valid && input.agent_state;
   const status = !valid ? 'unknown' : input.tool_confirmation_pending === true ? 'blocked'
     : nativeState === 'idle' ? 'idle' : ['working', 'tool_use'].includes(nativeState) ? 'running'
       : nativeState === 'error' ? 'failed' : 'unknown';
-  return { version: 1, pid: row.pid, generation: generation(row), tty: row.tty, observedAt,
+  return { version: 1, source: 'statusline', pid: row.pid, generation: generation(row), tty: row.tty, observedAt,
     conversation: valid ? id : null, title: valid ? safeTitle(input.conversation_title) : null, status };
+}
+
+async function hookReportFrom(input, row, observedAt) {
+  const id = input?.conversationId;
+  const transcriptPath = validTranscriptPath(id, input?.transcriptPath);
+  const event = input?.hookEventName;
+  const cwdOk = row.cwd && await sameDirectory(input?.cwd, row.cwd);
+  const valid = transcriptPath !== null && hookEvents.has(event) && cwdOk;
+  const status = !valid ? 'unknown'
+    : event === 'PreInvocation' ? 'running'
+      : event === 'Stop' && input?.fullyIdle === false ? 'running'
+        : 'idle';
+  return {
+    version: 1,
+    source: 'hook',
+    pid: row.pid,
+    generation: generation(row),
+    tty: row.tty,
+    observedAt,
+    conversation: valid ? id : null,
+    transcriptPath: valid ? transcriptPath : null,
+    title: valid ? safeTitle(input?.conversationTitle) : null,
+    status,
+    _event: valid ? event : null,
+  };
 }
 
 async function readReceipt(directory, pid) {
@@ -272,12 +371,18 @@ async function readReceipt(directory, pid) {
       const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
       if (bytesRead !== info.size) return null;
       const report = JSON.parse(buffer.toString('utf8', 0, bytesRead));
+      const source = report?.source === undefined ? 'statusline' : report.source;
       if (report?.version !== 1 || report.pid !== pid || typeof report.tty !== 'string'
+        || !['statusline', 'hook'].includes(source)
         || typeof report.generation !== 'string' || !/^[0-9a-f]{16}$/u.test(report.generation)
         || !Number.isSafeInteger(report.observedAt) || report.observedAt > Date.now() || report.observedAt > Math.ceil(info.mtimeMs)
         || (report.conversation !== null && (typeof report.conversation !== 'string' || !conversationId.test(report.conversation)))
         || !statuses.has(report.status)) return null;
-      return report;
+      if (source === 'hook') {
+        if (report.conversation !== null && !validTranscriptPath(report.conversation, report.transcriptPath)) return null;
+        if (report.turnSeq !== undefined && (!Number.isSafeInteger(report.turnSeq) || report.turnSeq < 0)) return null;
+      }
+      return { ...report, source };
     } finally { await file.close(); }
   } catch { return null; }
 }
@@ -305,30 +410,50 @@ async function lockReceipts(directory) {
 }
 
 async function writeReceipt(report) {
+  const { _event, ...incoming } = report;
+  let next = incoming;
   const directory = nativeReceiptDirectory();
   const temporary = join(directory, `.report-${randomUUID()}`);
-  const path = join(directory, `pid-${report.pid}.json`);
+  const path = join(directory, `pid-${next.pid}.json`);
   try { await mkdir(directory, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
   const original = await privateReceiptDirectory(directory);
   const lock = await lockReceipts(directory);
   try {
     const existing = await lstat(path).catch(error => { if (error.code !== 'ENOENT') throw error; });
     if (existing && !privateReceipt(existing)) throw new Error(storageUnavailable);
-    const previous = existing && await readReceipt(directory, report.pid);
-    if (previous?.observedAt > report.observedAt) return undefined;
-    if (previous?.generation === report.generation) {
-      if (previous.observedAt === report.observedAt && previous.conversation !== report.conversation) {
-        report = { ...report, conversation: null, title: null, status: 'unknown' };
+    const previous = existing && await readReceipt(directory, next.pid);
+    if (previous?.observedAt > next.observedAt) return undefined;
+    if (previous?.generation === next.generation) {
+      if (previous.observedAt === next.observedAt && previous.conversation !== next.conversation) {
+        next = { ...next, conversation: null, transcriptPath: null, title: null, status: 'unknown' };
       }
+    }
+    if (next.source === 'hook') {
+      const sameConv = previous?.generation === next.generation && previous?.conversation !== null && previous?.conversation === next.conversation;
+      const prevSeq = sameConv && Number.isSafeInteger(previous.turnSeq) ? previous.turnSeq : 0;
+      next = {
+        ...next,
+        title: next.title ?? (sameConv ? previous.title ?? null : null),
+        turnSeq: next.conversation === null ? 0 : (_event === 'PreInvocation' ? prevSeq + 1 : prevSeq),
+      };
+    } else if (previous?.source === 'hook' && previous.generation === next.generation && next.conversation !== null && previous.conversation === next.conversation) {
+      next = {
+        ...next,
+        source: 'hook',
+        transcriptPath: previous.transcriptPath,
+        turnSeq: previous.turnSeq ?? 0,
+        title: next.title ?? previous.title ?? null,
+        status: next.status === 'blocked' ? 'blocked' : previous.status,
+      };
     }
     const file = await open(temporary, 'wx', 0o600);
     try {
       await file.chmod(0o600);
-      await file.writeFile(JSON.stringify(report));
+      await file.writeFile(JSON.stringify(next));
     } finally { await file.close(); }
     if (!sameFile(original, await privateReceiptDirectory(directory))) throw new Error(storageUnavailable);
     await rename(temporary, path);
-    return report.conversation;
+    return next.conversation;
   } finally {
     try {
       if (sameFile(original, await privateReceiptDirectory(directory))) await unlink(temporary).catch(() => {});
@@ -341,12 +466,32 @@ function ownsReport(report, row) {
 }
 
 function sessionRow(row, report) {
+  if (report.source === 'hook') {
+    return {
+      ...processRow(row),
+      id: `agy:native-${row.pid}.${report.generation}-${report.conversation}`,
+      kind: 'session',
+      _agy: 'native',
+      _nativeSource: 'hook',
+      _transcriptPath: report.transcriptPath,
+      _turnSeq: report.turnSeq ?? 0,
+      title: safeTitle(report.title),
+      status: report.status,
+      history: true,
+      historyMode: 'persisted',
+      historyReason: undefined,
+      wait: true,
+      send: false,
+      sendReason: hintOnly,
+    };
+  }
   return { ...processRow(row), id: `agy:native-${row.pid}.${report.generation}-${report.conversation}`, kind: 'session', _agy: 'native',
-    title: safeTitle(report.title), status: report.status, sendReason: hintOnly };
+    _nativeSource: 'statusline', title: safeTitle(report.title), status: report.status, sendReason: hintOnly };
 }
 
-export function createNativeAdapter({ inspectProcesses: inspect = inspectProcesses, inspectStatusSource: verifySource = inspectStatusSource } = {}) {
-  const canObserve = process.platform === 'darwin' || verifySource !== inspectStatusSource;
+export function createNativeAdapter({ inspectProcesses: inspect = inspectProcesses, inspectStatusSource: verifySource = inspectStatusSource, inspectHookSource: verifyHookSource } = {}) {
+  const canObserveStatus = process.platform === 'darwin' || verifySource !== inspectStatusSource;
+  const resolveHookSource = verifyHookSource ?? (() => inspectHookSourceWith(inspect));
 
   async function currentRows(pid) {
     const rows = (await inspect(pid)).filter(row => interactive(row) && (pid === undefined || row.pid === pid));
@@ -366,15 +511,15 @@ export function createNativeAdapter({ inspectProcesses: inspect = inspectProcess
       };
       let reports = await read();
       if (!reports.length) return new Map();
-      // 首次进程检查也属于本次查询；它完成前收到的报告已是新鲜证据。
-      // 状态行没有心跳，只有尚未上报的候选才需要在同一短窗口内等待。
-      const fresh = report => report.observedAt > since;
-      const waiting = new Set(reports.filter(report => !fresh(report)).map(report => report.pid));
+      // hook 收据按生命周期事件写入（SessionStart / PreInvocation / Stop），空闲期持续有效；
+      // 状态行收据没有心跳，只有尚未上报的候选才需要在短窗口内等待新鲜证据。
+      const eligible = report => report.source === 'hook' || (canObserveStatus && report.observedAt > since);
+      const waiting = new Set(reports.filter(report => report.source !== 'hook' && canObserveStatus && report.observedAt <= since).map(report => report.pid));
       const deadline = performance.now() + observeMs;
       while (waiting.size && performance.now() < deadline) {
         await delay(Math.min(45, Math.max(0, deadline - performance.now())));
         reports = await read();
-        for (const report of reports) if (fresh(report)) waiting.delete(report.pid);
+        for (const report of reports) if (eligible(report)) waiting.delete(report.pid);
       }
       // 等待时进程也可能刚退出；不要把开始检查时的 PID 线索带回去。
       const current = await currentRows(pid);
@@ -385,7 +530,7 @@ export function createNativeAdapter({ inspectProcesses: inspect = inspectProcess
       reports = await read();
       if (pid !== undefined) {
         // 定向查询只复核实际声明同一对话的其他进程，不搜索 provider 数据。
-        const requested = reports.find(report => report.pid === pid && report.conversation && fresh(report));
+        const requested = reports.find(report => report.pid === pid && report.conversation && eligible(report));
         if (!requested) return new Map();
         for (const name of await readdir(directory)) {
           const other = pidFrom(receiptName.exec(name));
@@ -398,14 +543,29 @@ export function createNativeAdapter({ inspectProcesses: inspect = inspectProcess
         const latest = await readReceipt(directory, pid);
         // 重复归属检查始终针对同一 UUID。它期间的新刷新可以采用，
         // 但新的对话/代际、撤销或更旧的收据都不能替代已检查的报告。
-        if (!ownsReport(latest, rows.get(pid)) || latest.observedAt < requested.observedAt || latest.conversation !== requested.conversation) return new Map();
+        if (!ownsReport(latest, rows.get(pid)) || latest.observedAt < requested.observedAt || latest.conversation !== requested.conversation || !eligible(latest)) return new Map();
         reports = [latest];
       }
       if (!sameFile(original, await privateReceiptDirectory(directory))) return new Map();
       const counts = new Map();
       for (const report of reports) if (report.conversation) counts.set(report.conversation, (counts.get(report.conversation) ?? 0) + 1);
-      return new Map(reports.filter(report => report.conversation && fresh(report) && counts.get(report.conversation) === 1).map(report => [report.pid, report]));
+      return new Map(reports.filter(report => report.conversation && eligible(report) && counts.get(report.conversation) === 1).map(report => [report.pid, report]));
     } catch { return new Map(); }
+  }
+
+  async function lookupNative(id) {
+    const since = Date.now();
+    const native = nativeId.exec(id);
+    const pid = pidFrom(native ?? processId.exec(id));
+    if (pid === undefined) return undefined;
+    const rows = await currentRows(pid);
+    const row = rows.get(pid);
+    if (!row || !native) return row && processRow(row);
+    if (native[2] !== generation(row)) return undefined;
+    const report = (await reportsFor(rows, since, pid)).get(pid);
+    if (!report || !rows.has(pid)) return undefined;
+    const session = sessionRow(rows.get(pid), report);
+    return session.id === id ? session : undefined;
   }
 
   return {
@@ -413,23 +573,10 @@ export function createNativeAdapter({ inspectProcesses: inspect = inspectProcess
       const since = Date.now();
       const rows = await currentRows();
       if (!rows.size) return [];
-      const reports = canObserve ? await reportsFor(rows, since) : new Map();
+      const reports = await reportsFor(rows, since);
       return [...rows.values()].map(row => reports.has(row.pid) ? sessionRow(row, reports.get(row.pid)) : processRow(row));
     },
-    async lookupNative(id) {
-      const since = Date.now();
-      const native = nativeId.exec(id);
-      const pid = pidFrom(native ?? processId.exec(id));
-      if (pid === undefined) return undefined;
-      const rows = await currentRows(pid);
-      const row = rows.get(pid);
-      if (!row || !native) return row && processRow(row);
-      if (!canObserve || native[2] !== generation(row)) return undefined;
-      const report = (await reportsFor(rows, since, pid)).get(pid);
-      if (!report || !rows.has(pid)) return undefined;
-      const session = sessionRow(rows.get(pid), report);
-      return session.id === id ? session : undefined;
-    },
+    lookupNative,
     async recordNativeStatus(input) {
       const observedAt = Date.now();
       const source = await verifySource().catch(() => undefined);
@@ -442,15 +589,56 @@ export function createNativeAdapter({ inspectProcesses: inspect = inspectProcess
       try { conversation = await writeReceipt(report); } catch { throw new Error(storageUnavailable); }
       return conversation ? 'Perch: AGY conversation observed' : 'Perch: AGY conversation unavailable';
     },
-    async historyNative() {
-      // 无消息的真机合成会话未落盘 transcript，不猜测可见消息的行结构。
-      throw new Error(nativeHistoryUnavailable);
+    async recordNativeHook(input) {
+      const observedAt = Date.now();
+      const source = await resolveHookSource().catch(() => undefined);
+      const pid = typeof source === 'number' ? source : source?.pid;
+      if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) throw new Error(hookCallbackRefused);
+      const row = (await currentRows(pid).catch(() => null))?.get(pid);
+      if (!row || (typeof source === 'object' && (source.birth !== row.birth || source.tty !== row.tty || source.ppid !== row.ppid))) throw new Error(hookCallbackRefused);
+      const report = await hookReportFrom(input, row, observedAt);
+      let conversation;
+      try { conversation = await writeReceipt(report); } catch { throw new Error(storageUnavailable); }
+      return { conversation: conversation ?? null, status: report.status };
+    },
+    async historyNative(session, limit = 20) {
+      if (limit !== Infinity && (!Number.isSafeInteger(limit) || limit < 1)) throw new Error('Invalid history limit');
+      if (session?._agy !== 'native' || session._nativeSource !== 'hook') throw new Error(nativeHistoryUnavailable);
+      const live = await lookupNative(session.id);
+      if (!live || live._nativeSource !== 'hook' || !live._transcriptPath) throw new Error(nativeHistoryUnavailable);
+      let file;
+      try {
+        file = await open(live._transcriptPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      } catch (error) {
+        if (error.code === 'ENOENT') return [];
+        throw new Error(nativeHistoryUnavailable);
+      }
+      try {
+        const info = await file.stat();
+        if (!info.isFile() || info.uid !== uid || info.size > transcriptLimit) throw new Error(nativeHistoryUnavailable);
+        const text = await file.readFile('utf8');
+        return parseAgyTranscript(text, limit);
+      } finally { await file.close(); }
+    },
+    async waitNative(session, timeoutMs = null) {
+      if (timeoutMs !== null && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0)) throw new Error('Invalid wait timeout');
+      if (session?._agy !== 'native' || session._nativeSource !== 'hook') throw new Error(nativeIdentityUnavailable);
+      const deadline = timeoutMs === null ? Infinity : performance.now() + timeoutMs;
+      for (;;) {
+        const current = await lookupNative(session.id);
+        if (!current) return { status: 'interrupted', error: 'Antigravity CLI stopped unexpectedly' };
+        if (current.status === 'idle') return { status: 'completed' };
+        if (current.status === 'blocked') return { status: 'needs_input' };
+        if (current.status === 'failed') return { status: 'failed' };
+        if (performance.now() >= deadline) return { status: 'timeout' };
+        await delay(Math.min(150, Math.max(0, deadline - performance.now())));
+      }
     },
     async confirmNativeTui(session) {
-      // 真机在 /resume 选择器内仍报告 idle；不能据此投递文本、提交或任何具名键。
+      // 真机在 /resume 选择器内仍报告 idle；状态行不授权投递文本、提交或任何具名键。
       throw new Error(session?._agy === 'process' ? nativeIdentityUnavailable : nativeInputUnavailable);
     },
   };
 }
 
-export const { listNative, lookupNative, recordNativeStatus, historyNative, confirmNativeTui } = createNativeAdapter();
+export const { listNative, lookupNative, recordNativeStatus, recordNativeHook, historyNative, waitNative, confirmNativeTui } = createNativeAdapter();

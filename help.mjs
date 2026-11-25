@@ -23,7 +23,12 @@ const syntax = {
   view: ['perch view <id> [--lang zh|en]'],
   wait: ['perch wait <id> [--timeout seconds] [--json] [--lang zh|en]'],
   close: ['perch close <id> [--json] [--lang zh|en]'],
-  integration: ['perch integration install omp [--json] [--lang zh|en]', 'perch integration agy-statusline'],
+  integration: [
+    'perch integration install omp [--json] [--lang zh|en]',
+    'perch integration install agy [--json] [--lang zh|en]',
+    'perch integration agy-hook',
+    'perch integration agy-statusline',
+  ],
   version: ['perch --version | -V', 'perch version [--json] [--lang zh|en]'],
   update: ['perch update [--check] [--beta] [--json] [--repo OWNER/REPO] [--lang zh|en]'],
   help: ['perch help [<command> ...] [--lang zh|en]'],
@@ -372,26 +377,34 @@ perch close "$id"`,
     en: {
       purpose: 'Set up local provider integrations.',
       details: `install omp installs the extension for the active OMP profile.
+install agy installs the native Antigravity CLI plugin with lifecycle hooks.
+agy-hook is the hook callback invoked by the installed agy plugin.
 agy-statusline is a callback for the native agy status line; it does not change settings.`,
-      examples: 'perch integration install omp --json\nperch help integration agy-statusline',
+      examples: 'perch integration install omp --json\nperch integration install agy --json\nperch help integration agy-statusline',
     },
     zh: {
       purpose: '使用本地提供方集成。',
       details: `install omp 为当前 OMP profile 安装扩展。
+install agy 安装原生 Antigravity CLI 生命周期 hook 插件。
+agy-hook 是已安装的 agy 插件调用的 hook 回调。
 agy-statusline 是原生 agy 状态行的回调，不修改设置。`,
-      examples: 'perch integration install omp --json\nperch help integration agy-statusline',
+      examples: 'perch integration install omp --json\nperch integration install agy --json\nperch help integration agy-statusline',
     },
   },
   'integration install': {
     en: {
-      purpose: 'Install an integration; OMP is the supported target.',
-      details: 'The extension is installed for the active OMP profile. --json returns the result and path.',
-      examples: 'perch integration install omp --json',
+      purpose: 'Install an integration for OMP or AGY.',
+      details: `omp installs the extension for the active OMP profile.
+agy installs the native Antigravity CLI plugin under ~/.gemini/config/plugins/perch.
+--json returns the result and path.`,
+      examples: 'perch integration install omp --json\nperch integration install agy --json',
     },
     zh: {
-      purpose: '安装集成；支持的目标为 OMP。',
-      details: '扩展安装到当前 OMP profile。--json 返回结果和安装路径。',
-      examples: 'perch integration install omp --json',
+      purpose: '为 OMP 或 AGY 安装集成。',
+      details: `omp 将扩展安装到当前 OMP profile。
+agy 将原生 Antigravity CLI 插件安装到 ~/.gemini/config/plugins/perch。
+--json 返回结果和安装路径。`,
+      examples: 'perch integration install omp --json\nperch integration install agy --json',
     },
   },
   'integration install omp': {
@@ -410,6 +423,39 @@ with async completion follow-up notifications and automatic cleanup on exit.
 需要重启才能加载扩展。该扩展同时会在 OMP 内注册 perch 工具（支持 /vibe 模式），
 提供异步完成回推通知与退出自动清理。--json 返回安装结果和路径。`,
       examples: 'perch integration install omp --json',
+    },
+  },
+  'integration install agy': {
+    en: {
+      purpose: 'Install the native Antigravity CLI plugin for Perch.',
+      details: `Writes plugin.json and hooks.json to ~/.gemini/config/plugins/perch (or
+$AGY_CONFIG_DIR/plugins/perch) to register SessionStart, PreInvocation, and Stop
+hooks. Existing foreign files or symlinks are never overwritten; restart a running
+agy TUI to load the plugin. --json returns the installation result and path.`,
+      examples: 'perch integration install agy --json',
+    },
+    zh: {
+      purpose: '安装原生 Antigravity CLI 的 Perch 插件。',
+      details: `在 ~/.gemini/config/plugins/perch（或 $AGY_CONFIG_DIR/plugins/perch）写入
+plugin.json 和 hooks.json，注册 SessionStart、PreInvocation 和 Stop 生命周期 hook。
+不会覆盖已有的其他文件或符号链接；运行中的 agy TUI 需要重启才能加载插件。
+--json 返回安装结果和路径。`,
+      examples: 'perch integration install agy --json',
+    },
+  },
+  'integration agy-hook': {
+    en: {
+      purpose: 'Record native agy conversation state from a lifecycle hook.',
+      details: `Invoked automatically by the plugin installed via perch integration install agy.
+Reads hook JSON from piped stdin, verifies the calling interactive agy process
+ancestry, updates the private per-PID receipt, and prints {} on stdout.`,
+      examples: 'perch integration install agy --json\nprintf \'{}\' | perch integration agy-hook',
+    },
+    zh: {
+      purpose: '接收原生 agy 生命周期 hook 上报并更新会话状态。',
+      details: `由 perch integration install agy 安装的插件自动调用。
+从管道读取 hook JSON，核实调用链中的活动交互式 agy 进程，更新私有收据并在标准输出返回 {}。`,
+      examples: 'perch integration install agy --json\nprintf \'{}\' | perch integration agy-hook',
     },
   },
   'integration agy-statusline': {
@@ -456,8 +502,12 @@ macOS 上若启动参数解析不明确，连进程线索也可能不显示。
 };
 
 const lines = command => {
-  const entries = command === 'integration agy-statusline' ? [syntax.integration[1]]
-    : command.startsWith('integration install') ? [syntax.integration[0]] : syntax[command];
+  const entries = command === 'integration agy-statusline' ? [syntax.integration[3]]
+    : command === 'integration agy-hook' ? [syntax.integration[2]]
+      : command === 'integration install omp' ? [syntax.integration[0]]
+        : command === 'integration install agy' ? [syntax.integration[1]]
+          : command === 'integration install' ? [syntax.integration[0], syntax.integration[1]]
+            : syntax[command];
   return entries.map(line => `  ${line}`).join('\n');
 };
 

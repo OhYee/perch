@@ -28,7 +28,7 @@ const style = (text, code, stream = process.stdout) =>
   stream.isTTY && !Object.hasOwn(process.env, 'NO_COLOR') && process.env.TERM !== 'dumb' && !process.argv.slice(2).includes('--json')
     ? `\x1b[${code}m${text}\x1b[0m` : text;
 function highlightHelp(help) {
-  const token = /(\bperch\s+)(integration(?:\s+(?:install(?:\s+omp)?|agy-statusline))?|list|start|send|input|wait|history|view|close|version|update|help)\b|(?<![\w-])--[\w-]+|(?<![\w-])-[a-zA-Z](?![\w-])|<[^<>\n]+>|\b(?:idle|running|blocked|failed|stopped|unknown)\b/g;
+  const token = /(\bperch\s+)(integration(?:\s+(?:install(?:\s+(?:omp|agy))?|agy-hook|agy-statusline))?|list|start|send|input|wait|history|view|close|version|update|help)\b|(?<![\w-])--[\w-]+|(?<![\w-])-[a-zA-Z](?![\w-])|<[^<>\n]+>|\b(?:idle|running|blocked|failed|stopped|unknown)\b/g;
   return help.split('\n').map(line => {
     if (/^\s*(?:Usage:|用法：|Examples:|示例：)\s*$/.test(line)) return style(line, 1);
     return line.replace(token, (match, prefix, command) => {
@@ -236,6 +236,66 @@ async function installOmpIntegration() {
   return { provider: 'omp', status: 'already_installed', path };
 }
 
+function shellQuote(arg) {
+  return `'${String(arg).replaceAll("'", "'\\''")}'`;
+}
+
+async function installAgyIntegration() {
+  const configDir = process.env.AGY_CONFIG_DIR ? resolve(process.env.AGY_CONFIG_DIR) : join(homedir(), '.gemini', 'config');
+  const dir = join(configDir, 'plugins', 'perch');
+  const command = `${cliInvocation().map(shellQuote).join(' ')} integration agy-hook`;
+  const handler = [{ type: 'command', command, timeout: 5 }];
+  const files = [
+    [join(dir, 'plugin.json'), `${JSON.stringify({ name: 'perch' }, null, 2)}\n`],
+    [join(dir, 'hooks.json'), `${JSON.stringify({
+      'perch-native': {
+        SessionStart: handler,
+        PreInvocation: handler,
+        Stop: handler,
+      },
+    }, null, 2)}\n`],
+  ];
+  const conflict = target => Error(tr(
+    `Cannot install AGY integration: ${quote(target)} already exists and is not this installation; remove or move it before retrying.`,
+    `无法安装 AGY 集成：${quote(target)} 已存在且不是本次安装的文件；请先移走或删除它，再重试。`,
+  ));
+  const existingDir = await lstat(dir).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  if (existingDir && !existingDir.isDirectory()) throw conflict(dir);
+  const states = [];
+  for (const [path, content] of files) {
+    const info = await lstat(path).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    if (!info) {
+      states.push({ path, content, present: false });
+      continue;
+    }
+    if (!info.isFile()) throw conflict(path);
+    let file;
+    try {
+      file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (error) {
+      if (error.code === 'ELOOP') throw conflict(path);
+      throw error;
+    }
+    try {
+      if (!(await file.stat()).isFile() || await file.readFile('utf8') !== content) throw conflict(path);
+    } finally { await file.close(); }
+    states.push({ path, content, present: true });
+  }
+  if (states.every(item => item.present)) return { provider: 'agy', status: 'already_installed', path: dir };
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  for (const { path, content, present } of states) {
+    if (present) continue;
+    try {
+      const file = await open(path, 'wx', 0o600);
+      try { await file.writeFile(content); } finally { await file.close(); }
+    } catch (error) {
+      if (error.code === 'EEXIST') throw conflict(path);
+      throw error;
+    }
+  }
+  return { provider: 'agy', status: 'installed', path: dir };
+}
+
 async function run([command, ...args]) {
   const rootHelp = overview(lang);
   if (command === '--version' || command === '-V') {
@@ -306,13 +366,33 @@ async function run([command, ...args]) {
       }
       return console.log(quote(diagnostic(await api.recordNativeStatus(input))));
     }
-    if (positionals.length !== 2 || positionals[0] !== 'install' || positionals[1] !== 'omp') {
+    if (positionals[0] === 'agy-hook') {
+      if (positionals.length !== 1 || values.json || boundary !== -1) throw Error(commandHelp('integration agy-hook', lang));
+      if (process.stdin.isTTY) throw Error(tr('AGY hook expects JSON on piped stdin', 'AGY hook 需要从管道读取 JSON'));
+      const api = await adapter('agy');
+      let input;
+      try {
+        const bytes = await readStdin(256 * 1024, tr('AGY hook payload exceeds 256 KiB', 'AGY hook 载荷超过 256 KiB'));
+        try { input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch {}
+        if (!input || typeof input !== 'object' || Array.isArray(input)) {
+          throw Error(tr('Invalid AGY hook JSON', 'AGY hook JSON 无效'));
+        }
+      } catch (error) {
+        try { await api.recordNativeHook(null); } catch {}
+        throw error;
+      }
+      await api.recordNativeHook(input);
+      return console.log('{}');
+    }
+    if (positionals.length !== 2 || positionals[0] !== 'install' || !['omp', 'agy'].includes(positionals[1])) {
       const topic = positionals[0] === 'install'
-        ? positionals[1] === 'omp' ? 'integration install omp' : 'integration install'
+        ? positionals[1] === 'omp' ? 'integration install omp'
+          : positionals[1] === 'agy' ? 'integration install agy'
+            : 'integration install'
         : 'integration';
       throw Error(commandHelp(topic, lang));
     }
-    const result = await installOmpIntegration();
+    const result = positionals[1] === 'agy' ? await installAgyIntegration() : await installOmpIntegration();
     return values.json ? json(result) : console.log(`${style(result.status === 'installed' ? tr('Installed', '已安装') : tr('Already installed', '已安装过'), 32)}: ${style(quote(result.path), 36)}`);
   }
   if (command === 'list') {

@@ -25,7 +25,7 @@ test('explicit language overrides the environment for help and invalid options',
 });
 
 test('each command has local usage and examples, including nested integration help', () => {
-  for (const topic of ['list', 'start', 'resume', 'send', 'input', 'history', 'view', 'wait', 'close', 'integration', 'integration install', 'integration install omp', 'integration agy-statusline']) {
+  for (const topic of ['list', 'start', 'resume', 'send', 'input', 'history', 'view', 'wait', 'close', 'integration', 'integration install', 'integration install omp', 'integration install agy', 'integration agy-hook', 'integration agy-statusline']) {
     for (const [lang, heading] of [['en', 'Examples:'], ['zh', '示例：']]) {
       const result = spawnSync(process.execPath, [cli, ...topic.split(' '), '--help', '--lang', lang], { encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);

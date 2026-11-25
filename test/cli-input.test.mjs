@@ -57,6 +57,7 @@ function fixture(t) {
       throw Error('AGY native input is unavailable: the status line does not prove the editor can accept input safely');
     }
     export async function recordNativeStatus(report) { record(['agy:status', report]); return 'AGY fixture'; }
+    export async function recordNativeHook(payload) { record(['agy:hook', payload]); return { conversation: payload?.conversationId ?? null, status: 'idle' }; }
   `;
   const terminal = `
     import { appendFileSync } from 'node:fs';
@@ -263,4 +264,21 @@ test('AGY status line accepts only a bounded piped JSON object and clears invali
     assert.deepEqual(f.calls().at(-1), ['agy:status', null]);
   }
   assert.equal(f.calls().length, 4);
+});
+
+test('AGY hook accepts piped JSON object, prints {}, and clears invalid reports without reflecting payloads', t => {
+  const f = fixture(t);
+  const args = ['integration', 'agy-hook'];
+  const payload = { conversationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', hookEventName: 'SessionStart' };
+  const valid = f.run(args, {}, JSON.stringify(payload));
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.equal(valid.stdout, '{}\n');
+  assert.deepEqual(f.calls(), [['agy:hook', payload]]);
+  const marker = 'fixture-hook-private';
+  for (const text of [`{${marker}`, JSON.stringify([marker])]) {
+    const rejected = f.run(args, {}, text);
+    assert.equal(rejected.status, 1);
+    assert.doesNotMatch(rejected.stdout + rejected.stderr, /fixture-hook-private/);
+    assert.deepEqual(f.calls().at(-1), ['agy:hook', null]);
+  }
 });

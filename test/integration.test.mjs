@@ -106,3 +106,47 @@ test('install rejects an unknown provider without creating the agent directory',
   assert.ok(result.stderr);
   await assert.rejects(lstat(agentDir), { code: 'ENOENT' });
 });
+
+test('AGY install writes plugin.json and hooks.json and repeat install is idempotent', async t => {
+  const { home, run } = await fixture(t);
+  const dir = join(home, '.gemini', 'config', 'plugins', 'perch');
+  const first = run('integration', 'install', 'agy', '--json', '--lang', 'zh');
+  assert.equal(first.status, 0, first.stderr);
+  assert.deepEqual(JSON.parse(first.stdout), { provider: 'agy', status: 'installed', path: dir });
+  const plugin = JSON.parse(await readFile(join(dir, 'plugin.json'), 'utf8'));
+  assert.deepEqual(plugin, { name: 'perch' });
+  const hooks = JSON.parse(await readFile(join(dir, 'hooks.json'), 'utf8'));
+  for (const event of ['SessionStart', 'PreInvocation', 'Stop']) {
+    assert.equal(Array.isArray(hooks['perch-native'][event]), true);
+    assert.match(hooks['perch-native'][event][0].command, /integration agy-hook$/);
+  }
+  const second = run('integration', 'install', 'agy', '--json', '--lang', 'en');
+  assert.equal(second.status, 0, second.stderr);
+  assert.deepEqual(JSON.parse(second.stdout), { provider: 'agy', status: 'already_installed', path: dir });
+});
+
+test('AGY install refuses to overwrite foreign plugin files or symlinks', async t => {
+  const { home, run } = await fixture(t);
+  const dir = join(home, '.gemini', 'config', 'plugins', 'perch');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'hooks.json'), '{"foreign":true}\n');
+  const foreign = run('integration', 'install', 'agy', '--json');
+  assert.notEqual(foreign.status, 0);
+  assert.ok(foreign.stderr);
+  assert.equal(await readFile(join(dir, 'hooks.json'), 'utf8'), '{"foreign":true}\n');
+  await assert.rejects(lstat(join(dir, 'plugin.json')), { code: 'ENOENT' });
+
+  const symHome = await mkdtemp(join(tmpdir(), 'agent-session-agy-sym-'));
+  t.after(() => rm(symHome, { recursive: true, force: true }));
+  const symDir = join(symHome, '.gemini', 'config', 'plugins', 'perch');
+  await mkdir(join(symDir, '..'), { recursive: true });
+  const target = join(symHome, 'target');
+  await mkdir(target);
+  await symlink(target, symDir);
+  const symResult = spawnSync(process.execPath, [cli, 'integration', 'install', 'agy', '--json'], {
+    env: { PATH: process.env.PATH, HOME: symHome, LC_ALL: 'en_US.UTF-8' },
+    encoding: 'utf8',
+  });
+  assert.notEqual(symResult.status, 0);
+  assert.equal((await lstat(symDir)).isSymbolicLink(), true);
+});
