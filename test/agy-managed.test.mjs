@@ -113,7 +113,7 @@ test('managed AGY starts only an empty owned ACP session and preserves provider 
   assert.match(selected.id, /^agy:[a-f0-9-]{36}$/);
   assert.equal((await lookupBridge(selected.id)).id, selected.id);
   const before = await f.trace();
-  assert.deepEqual(before[0].argv, ['acp']);
+  assert.deepEqual(before[0].argv, ['acp', '--dangerously-skip-permissions']);
   assert.deepEqual(methods(before), ['initialize', 'session/new', 'session/set_config_option']);
   assert.deepEqual(before[1].params, { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'perch', version: before[1].params.clientInfo.version } });
   assert.match(before[1].params.clientInfo.version, /\d+\.\d+\.\d+/);

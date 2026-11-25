@@ -171,7 +171,7 @@ perch resume "$id"    # 重新打开同一段对话，不会发消息
 ```
 
 - OMP 对话 ID 为 `omp:<原生会话 UUID>`：关闭后仍可用 `history` 读取已保存的托管记录；`resume` 打开同一记录，已经运行则复用，不补发消息或自动续做。旧的 `omp:<PID>:<随机值>` 不是持久 ID；对仍在线的会话，重新 `list --provider omp`，替换脚本中保存的旧值。`omp:pid-…` 仅标识进程，不能恢复。暂不支持恢复已关闭的原生 TUI、Codex 或 Claude。
-- 托管模式的 `start` 不带消息；模型可用 `--model` 指定。多行消息可通过 `perch send "$id" --stdin` 发送。
+- 托管模式的 `start` 不带消息；模型可用 `--model` 指定。多行消息可通过 `perch send "$id" --stdin` 发送。托管启动默认启用各提供方的非交互全权限（full-access / yolo）模式：`agy acp --dangerously-skip-permissions`、`codex` 的 `approvalPolicy: "never"` 与 `sandbox: "danger-full-access"`、`omp --approval-mode yolo`、`claude --permission-mode bypassPermissions --dangerously-skip-permissions`；仅在可信工作目录中使用。
 - OMP 托管和原生启动都支持 `--model 模型名[:思考等级]`；省略等级时沿用 OMP 默认值。例如 `perch start omp --model MODEL --json`，请将 `MODEL` 替换为本机可用模型。提供方原始参数放在 `--` 之后，`--json` 等会话选项放在之前。原生 OMP、Codex 和 Claude 原样透传，托管 OMP 仅支持 `-e`/`--extension` 和 `--thinking`；其余托管模式及原生 agy 不接受额外参数。
 - `wait ID` 默认不设时限；已经空闲（包括尚未发过消息）就立即返回。`--timeout N` 限制等待秒数，`--timeout 0` 只查当前状态。`--json` 返回状态，不附带聊天正文。要看回复，另用 `history`。
 - `wait` 退出码：`0` 已完成；`2` 等待超时；`3` 需要人工输入；`1` 失败、中断或参数错误。脚本应按退出码分支；需要人工介入时不要自动同意，也不要把部分回复当最终结果。

@@ -22,7 +22,7 @@ const { createInterface } = require('node:readline');
 const args = process.argv.slice(2);
 if (args[0] === 'collab') { console.log(JSON.stringify({ version: 1, hosts: [] })); process.exit(0); }
 if (args[0] === 'session') { console.log(JSON.stringify({ held: [], unknown: [] })); process.exit(0); }
-if (args[0] !== '--mode' || args[1] !== 'rpc' || args[2] !== '--session-dir') process.exit(1);
+if (args[0] !== '--mode' || args[1] !== 'rpc' || args[2] !== '--session-dir' || args[4] !== '--approval-mode' || args[5] !== 'yolo') process.exit(1);
 const resume = args.indexOf('--resume');
 const file = resume < 0 ? join(args[3], 'session_' + randomUUID() + '.jsonl') : args[resume + 1];
 const rows = resume < 0 ? [] : readFileSync(file, 'utf8').trim().split('\\n').map(JSON.parse);

@@ -346,7 +346,7 @@ test('managed native bridge preserves event-correlated turns and zero-timeout sn
     assert.deepEqual((await history(session, 1))[0], { role: 'assistant', text: `answer ${legacy.turnId}` });
     const entries = (await readFile(fixture.log, 'utf8')).trim().split('\n').map(JSON.parse);
     const threadStart = entries.find(entry => entry.method === 'thread/start');
-    assert.deepEqual(threadStart.params, { cwd: await realpath(fixture.work), model: 'fixture-model' });
+    assert.deepEqual(threadStart.params, { cwd: await realpath(fixture.work), approvalPolicy: 'never', sandbox: 'danger-full-access', model: 'fixture-model' });
     assert.equal(entries.some(entry => entry.method === 'thread/resume'), false);
     assert.equal(entries.some(entry => entry.method === 'thread/read'), false);
     const pid = session.pid;
