@@ -27,7 +27,10 @@ async function main() {
 
   const id = randomUUID();
   const socketPath = join(bridgeDir, `${id}.sock`);
-  const args = ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--replay-user-messages', '--session-id', id, '--permission-mode', 'dontAsk', '--permission-prompts', 'none'];
+  const permissionArgs = managed
+    ? ['--permission-mode', 'bypassPermissions', '--dangerously-skip-permissions']
+    : ['--permission-mode', 'dontAsk', '--permission-prompts', 'none'];
+  const args = ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--replay-user-messages', '--session-id', id, ...permissionArgs];
   if (managed) args.push('--disable-slash-commands');
   if (model) args.push('--model', model);
   const child = spawn(binary, args, { stdio: ['pipe', 'pipe', 'inherit'] });

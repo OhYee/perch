@@ -16,8 +16,17 @@ const source = String.raw`
 #include <unistd.h>
 int main(int argc, char **argv) {
   const char *id = NULL;
-  for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], "--session-id")) id = argv[i + 1];
-  if (!id) return 1;
+  const char *perm = NULL;
+  int managed_flag = 0, skip_perms = 0;
+  for (int i = 1; i < argc; i++) {
+    if (!strcmp(argv[i], "--session-id") && i + 1 < argc) id = argv[++i];
+    else if (!strcmp(argv[i], "--permission-mode") && i + 1 < argc) perm = argv[++i];
+    else if (!strcmp(argv[i], "--disable-slash-commands")) managed_flag = 1;
+    else if (!strcmp(argv[i], "--dangerously-skip-permissions")) skip_perms = 1;
+  }
+  if (!id || !perm) return 1;
+  if (managed_flag && (strcmp(perm, "bypassPermissions") != 0 || !skip_perms)) return 2;
+  if (!managed_flag && strcmp(perm, "dontAsk") != 0) return 3;
   setvbuf(stdout, NULL, _IONBF, 0);
   char *line = NULL; size_t size = 0;
   while (getline(&line, &size, stdin) != -1) {

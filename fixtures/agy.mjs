@@ -7,7 +7,7 @@ const { AGY_FIXTURE_LOG: logPath, AGY_FIXTURE_RELEASE: release, AGY_FIXTURE_STAR
 const argv = process.argv.slice(2);
 const log = value => { if (logPath) appendFileSync(logPath, JSON.stringify(value) + '\n'); };
 log({ argv, pid: process.pid, ppid: process.ppid });
-if (argv.length !== 1 || argv[0] !== 'acp') process.exit(2);
+if (argv.length !== 2 || argv[0] !== 'acp' || argv[1] !== '--dangerously-skip-permissions') process.exit(2);
 
 let sessionId = `fixture/opaque:${randomUUID()}`;
 let model = 'fixture-default';

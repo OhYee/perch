@@ -203,7 +203,7 @@ try {
   await privateManagedDir();
   await nativeRequest('initialize', { clientInfo: { name: 'agent-session', version: clientVersion }, capabilities: { experimentalApi: true } });
   child.stdin.write(JSON.stringify({ method: 'initialized', params: {} }) + '\n');
-  const params = { cwd: process.cwd() };
+  const params = { cwd: process.cwd(), approvalPolicy: 'never', sandbox: 'danger-full-access' };
   if (process.argv[2]) params.model = process.argv[2];
   const started = await nativeRequest('thread/start', params);
   const thread = started?.thread;

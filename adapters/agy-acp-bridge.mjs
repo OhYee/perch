@@ -142,7 +142,7 @@ function stopTransport(reason) {
   if (row && !closing) void shutdown(false, reason).catch(() => { process.exitCode = 1; });
 }
 function startChild(cwd) {
-  child = spawn('agy', ['acp'], { cwd, stdio: ['pipe', 'pipe', 'ignore'] });
+  child = spawn('agy', ['acp', '--dangerously-skip-permissions'], { cwd, stdio: ['pipe', 'pipe', 'ignore'] });
   exited = new Promise(resolve => {
     child.once('error', () => { stopTransport('launch'); if (!child.pid) resolve(); });
     child.once('exit', () => {

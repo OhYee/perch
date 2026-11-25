@@ -399,13 +399,16 @@ agy-statusline 是原生 agy 状态行的回调，不修改设置。`,
       purpose: 'Install the OMP extension for the active profile.',
       details: `Run in the same environment as the target OMP session. Existing installations
 are not overwritten; restart a running OMP TUI to load the extension.
+The extension also registers the perch tool inside OMP (including /vibe mode)
+with async completion follow-up notifications and automatic cleanup on exit.
 --json returns the installation result and path.`,
       examples: 'perch integration install omp --json',
     },
     zh: {
       purpose: '为当前 profile 安装 OMP 扩展。',
       details: `请在目标 OMP 会话相同的环境中执行。不会覆盖已有安装；运行中的 OMP TUI
-需要重启才能加载扩展。--json 返回安装结果和路径。`,
+需要重启才能加载扩展。该扩展同时会在 OMP 内注册 perch 工具（支持 /vibe 模式），
+提供异步完成回推通知与退出自动清理。--json 返回安装结果和路径。`,
       examples: 'perch integration install omp --json',
     },
   },
