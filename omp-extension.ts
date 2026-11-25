@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:net';
-import { existsSync, mkdirSync, lstatSync, chmodSync, unlinkSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, lstatSync, chmodSync, realpathSync, unlinkSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -10,11 +10,13 @@ import { systemLanguage } from './locale.mjs';
 import { translateDiagnostic } from './diagnostics.mjs';
 
 const PROVIDERS = new Set(['omp', 'codex', 'claude', 'agy']);
+const NATIVE_DEFAULT_PROVIDERS = new Set(['omp', 'agy']);
 const PANES = new Set(['right', 'tern', 'tmux', 'herdr']);
 const MAX_CLI_STDOUT = 16 * 1024 * 1024;
 const MAX_NOTIFICATION_CHARS = 4000;
 const MAX_HEARTBEAT_PREVIEW_CHARS = 600;
 const DEFAULT_HEARTBEAT_SECONDS = 180;
+const DEFAULT_NATIVE_DISCOVER_MS = 15000;
 
 type PerchToolParams = {
   op: string;
@@ -22,6 +24,7 @@ type PerchToolParams = {
   id?: string;
   name?: string;
   owned?: boolean;
+  native?: boolean;
   cwd?: string;
   model?: string;
   executable?: string;
@@ -50,6 +53,7 @@ type TrackedTask = {
   id: string;
   name?: string;
   provider?: string;
+  mode?: 'managed' | 'native';
   model?: string;
   cwd?: string;
   state: TaskState;
@@ -85,13 +89,13 @@ function resolvePerchInvocation(): [string, string[]] {
 
 function runPerchCli(
   args: string[],
-  options: { input?: string; signal?: AbortSignal; timeoutMs?: number } = {},
+  options: { input?: string; signal?: AbortSignal; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<CliRunResult> {
   return new Promise((resolve, reject) => {
     const [command, prefix] = resolvePerchInvocation();
     const child = spawn(command, [...prefix, ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: options.env ?? process.env,
     });
     let stdout = '';
     let stderr = '';
@@ -201,6 +205,20 @@ function taskLabel(id: string, task: TrackedTask | undefined): string {
   return meta ? `${base} [${meta}]` : base;
 }
 
+function resolveNativeDiscoverMs(): number {
+  const raw = process.env.PERCH_NATIVE_DISCOVER_MS?.trim();
+  if (raw !== undefined && raw !== '') {
+    const parsed = Number(raw);
+    if (Number.isSafeInteger(parsed) && parsed >= 100 && parsed <= 60000) return parsed;
+  }
+  return DEFAULT_NATIVE_DISCOVER_MS;
+}
+
+function canonicalDir(value: string | undefined): string | null {
+  if (!value) return null;
+  try { return realpathSync(value); } catch { return resolve(value); }
+}
+
 function formatNotification(
   id: string,
   status: string,
@@ -217,6 +235,7 @@ function formatNotification(
     const clipped = clipText(replyText, MAX_NOTIFICATION_CHARS);
     lines.push('Latest assistant reply:', clipped.text);
   }
+  lines.push('Action: inspect this result, update the user with your current status/decision tables, and proceed with the next step (or call perch op=close for managed sessions when finished).');
   return lines.join('\n');
 }
 
@@ -276,6 +295,115 @@ export default function (pi: ExtensionAPI) {
   const ownedSessions = new Set<string>();
   const tasks = new Map<string, TrackedTask>();
   const watchers = new Map<string, WatcherEntry>();
+  const nativeLaunchChains = new Map<string, Promise<void>>();
+
+  async function withNativeLaunchLock<T>(provider: string, fn: () => Promise<T>): Promise<T> {
+    const previous = nativeLaunchChains.get(provider) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const next = previous.then(() => gate);
+    nativeLaunchChains.set(provider, next);
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (nativeLaunchChains.get(provider) === next) nativeLaunchChains.delete(provider);
+    }
+  }
+
+  async function deliverPrompt(
+    id: string,
+    message: string,
+    options: { signal?: AbortSignal; notify: boolean; heartbeatMs: number; name?: string },
+  ): Promise<{ accepted: boolean | null; running?: boolean; notify: boolean; warning?: string }> {
+    const result = await runPerchCli(['send', id, '--stdin', '--json'], {
+      input: message,
+      signal: options.signal,
+      timeoutMs: 120000,
+    });
+    if (result.code === 0) {
+      ensureTask(id, {
+        ...(options.name ? { name: options.name } : {}),
+        state: 'running',
+        unhandled: false,
+        startedAt: Date.now(),
+        finishedAt: undefined,
+        error: undefined,
+        heartbeatCount: 0,
+      });
+      if (options.notify) startWatcher(id, options.heartbeatMs);
+      return { accepted: true, notify: options.notify };
+    }
+    let parsed: { accepted?: boolean | null } | undefined;
+    try { parsed = parseJson(result.stdout) as { accepted?: boolean | null } | undefined; } catch {}
+    if (parsed?.accepted === null) {
+      const probe = await runPerchCli(['wait', id, '--timeout', '0', '--json'], {
+        signal: options.signal,
+        timeoutMs: 5000,
+      }).catch(() => undefined);
+      let probeJson: { status?: string } | undefined;
+      try { probeJson = probe ? parseJson(probe.stdout) as { status?: string } | undefined : undefined; } catch {}
+      if (probeJson?.status === 'timeout') {
+        ensureTask(id, {
+          ...(options.name ? { name: options.name } : {}),
+          state: 'running',
+          unhandled: false,
+          startedAt: Date.now(),
+          finishedAt: undefined,
+          error: undefined,
+          heartbeatCount: 0,
+        });
+        if (options.notify) startWatcher(id, options.heartbeatMs);
+        return {
+          accepted: null,
+          running: true,
+          notify: options.notify,
+          warning: 'Delivery confirmation timed out, but the worker is running; async watcher attached. Do not resend.',
+        };
+      }
+    }
+    throw new Error(cliErrorMessage(result, 'perch send failed'));
+  }
+
+  async function listProviderSessions(provider: string, signal?: AbortSignal): Promise<Array<Record<string, unknown>>> {
+    const res = await runPerchCli(['list', '--provider', provider, '--json'], { signal, timeoutMs: 10000 });
+    if (res.code !== 0) return [];
+    try {
+      const parsed = parseJson(res.stdout);
+      return Array.isArray(parsed) ? parsed as Array<Record<string, unknown>> : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function waitForNewNativeSession(
+    provider: string,
+    cwd: string,
+    beforeIds: Set<string>,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    const targetCwd = canonicalDir(cwd);
+    const deadline = Date.now() + resolveNativeDiscoverMs();
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw Object.assign(new Error('Perch command aborted'), { name: 'AbortError' });
+      const rows = await listProviderSessions(provider, signal);
+      const candidates = rows.filter(row => {
+        const id = typeof row?.id === 'string' ? row.id : '';
+        return id && !beforeIds.has(id) && !tasks.has(id) && row.kind === 'session' && row.send === true;
+      });
+      const exact = candidates.find(row => {
+        const rowCwd = typeof row.cwd === 'string' ? canonicalDir(row.cwd) : null;
+        return rowCwd && targetCwd && rowCwd === targetCwd;
+      });
+      if (exact && typeof exact.id === 'string') return exact.id;
+      if (candidates.length === 1 && typeof candidates[0].id === 'string') return candidates[0].id;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await delay(Math.min(250, remaining), undefined, { signal }).catch(() => {});
+    }
+    return undefined;
+  }
 
   function sessionStatus(ctx: ExtensionContext): 'running' | 'idle' | 'unknown' {
     const idle = ctx.isIdle();
@@ -507,13 +635,14 @@ export default function (pi: ExtensionAPI) {
       approval: 'exec',
       loadMode: 'essential',
       strict: true,
-      description: 'Manage local agent sessions (agy, omp, codex, claude) through Perch. Managed sessions run in full-access / yolo mode. Supports op=list (with owned=true to list only this director’s tracked tasks), start (optional name label and prompt to send immediately), send (async notification enabled by default via notify=true, plus periodic heartbeatSeconds default 180s to prevent silent hangs), wait, history, resume, and close. Active running and unhandled finished tasks are automatically injected into context so dispatched work is never lost.',
+      description: 'Manage local agent sessions (agy, omp, codex, claude) through Perch. Both native and managed starts run in full-access / yolo mode by default. In interactive TUI mode, op=start defaults to native=true with pane=right for omp and agy (opens a live native TUI side pane, discovers its session ID, sends prompt, and attaches async completion pushback); pass native=false for headless managed background sessions. Do NOT block with op=wait(timeout>0) or bash sleep loops — rely on notify=true async updates, op=list(owned=true), and op=wait(timeout=0). If op=send reports busy, the message was rejected (NOT queued); wait until idle before resending.',
       parameters: type({
         op: "'list' | 'start' | 'send' | 'wait' | 'history' | 'resume' | 'close'",
         'provider?': "'omp' | 'codex' | 'claude' | 'agy'",
         'id?': 'string > 0',
         'name?': 'string > 0',
         'owned?': 'boolean',
+        'native?': 'boolean',
         'cwd?': 'string > 0',
         'model?': 'string > 0',
         'executable?': 'string > 0',
@@ -587,9 +716,78 @@ export default function (pi: ExtensionAPI) {
           if (!params.provider || !PROVIDERS.has(params.provider)) {
             throw new Error('perch start requires provider (agy, omp, codex, or claude)');
           }
+          if (params.prompt !== undefined && !params.prompt.trim()) throw new Error('prompt must not be empty');
           const heartbeatMs = resolveHeartbeatMs(params.heartbeatSeconds);
           const taskName = sanitizeName(params.name);
           const cwd = params.cwd || ctx.cwd;
+          const defaultNative = ctx.mode === 'tui' && NATIVE_DEFAULT_PROVIDERS.has(params.provider);
+          const useNative = params.native !== undefined ? params.native : defaultNative;
+
+          if (useNative) {
+            const pane = params.pane ?? 'right';
+            if (!PANES.has(pane)) throw new Error(`Unsupported pane: ${pane}`);
+            const nativeResult = await withNativeLaunchLock(params.provider, async () => {
+              const beforeRows = await listProviderSessions(params.provider!, signal);
+              const beforeIds = new Set(beforeRows.map(r => r?.id).filter((v): v is string => typeof v === 'string'));
+              const nativeArgs = ['start', params.provider!, '--native', '--pane', pane, '--cwd', cwd, '--json'];
+              if (params.model) nativeArgs.push('--model', params.model);
+              if (params.executable) nativeArgs.push('--executable', params.executable);
+              if (params.workspace) nativeArgs.push('--workspace', params.workspace);
+              if (params.tab) nativeArgs.push('--tab', params.tab);
+              const childEnv = params.provider === 'omp'
+                ? { ...process.env, PERCH_MANAGED_WORKER: '1' }
+                : process.env;
+              const startedResult = await runPerchCli(nativeArgs, { signal, timeoutMs: 45000, env: childEnv });
+              if (startedResult.code !== 0) {
+                if (params.native === undefined) return { fallback: true as const };
+                throw new Error(cliErrorMessage(startedResult, 'perch start --native failed'));
+              }
+              const started = parseJson(startedResult.stdout) as { provider?: string; mode?: string; pane?: unknown };
+              const discoveredId = await waitForNewNativeSession(params.provider!, cwd, beforeIds, signal);
+              if (!discoveredId) {
+                throw new Error(`Native ${params.provider} pane opened, but no controllable session registered in time. Ensure perch integration install ${params.provider} is active, or retry with native=false.`);
+              }
+              ensureTask(discoveredId, {
+                ...(taskName ? { name: taskName } : {}),
+                provider: params.provider,
+                mode: 'native',
+                ...(params.model ? { model: params.model } : {}),
+                cwd,
+                state: 'idle',
+                unhandled: false,
+                error: undefined,
+                heartbeatCount: 0,
+              });
+              return { fallback: false as const, id: discoveredId, started };
+            });
+            if (!nativeResult.fallback) {
+              const { id, started } = nativeResult;
+              if (params.prompt !== undefined) {
+                const delivered = await deliverPrompt(id, params.prompt, {
+                  signal,
+                  notify: params.notify !== false,
+                  heartbeatMs,
+                  name: taskName,
+                });
+                return emit({
+                  id,
+                  provider: params.provider,
+                  mode: 'native',
+                  pane: started.pane,
+                  ...(taskName ? { name: taskName } : {}),
+                  ...delivered,
+                });
+              }
+              return emit({
+                id,
+                provider: params.provider,
+                mode: 'native',
+                pane: started.pane,
+                ...(taskName ? { name: taskName } : {}),
+              });
+            }
+          }
+
           const args = ['start', params.provider, '--cwd', cwd, '--json'];
           if (params.model) args.push('--model', params.model);
           if (params.executable) args.push('--executable', params.executable);
@@ -607,6 +805,7 @@ export default function (pi: ExtensionAPI) {
           ensureTask(started.id, {
             ...(taskName ? { name: taskName } : {}),
             provider: params.provider,
+            mode: 'managed',
             ...(params.model ? { model: params.model } : {}),
             cwd,
             state: 'idle',
@@ -615,26 +814,15 @@ export default function (pi: ExtensionAPI) {
             heartbeatCount: 0,
           });
           if (params.prompt !== undefined) {
-            if (!params.prompt.trim()) throw new Error('prompt must not be empty');
-            const sentResult = await runPerchCli(['send', started.id, '--stdin', '--json'], {
-              input: params.prompt,
+            const delivered = await deliverPrompt(started.id, params.prompt, {
               signal,
-              timeoutMs: 120000,
+              notify: params.notify !== false,
+              heartbeatMs,
+              name: taskName,
+            }).catch(error => {
+              throw new Error(`Session ${started.id} started, but initial send failed: ${error instanceof Error ? error.message : String(error)}`);
             });
-            if (sentResult.code !== 0) {
-              throw new Error(`Session ${started.id} started, but initial send failed: ${cliErrorMessage(sentResult, 'perch send failed')}`);
-            }
-            ensureTask(started.id, {
-              state: 'running',
-              unhandled: false,
-              startedAt: Date.now(),
-              finishedAt: undefined,
-              error: undefined,
-              heartbeatCount: 0,
-            });
-            const shouldNotify = params.notify !== false;
-            if (shouldNotify) startWatcher(started.id, heartbeatMs);
-            return emit({ ...started, ...(taskName ? { name: taskName } : {}), accepted: true, notify: shouldNotify });
+            return emit({ ...started, ...(taskName ? { name: taskName } : {}), ...delivered });
           }
           return emit({ ...started, ...(taskName ? { name: taskName } : {}) });
         }
@@ -643,25 +831,14 @@ export default function (pi: ExtensionAPI) {
           const message = params.text ?? params.prompt;
           if (!message || !message.trim()) throw new Error('perch send requires non-empty text');
           const heartbeatMs = resolveHeartbeatMs(params.heartbeatSeconds);
-          const result = await runPerchCli(['send', params.id, '--stdin', '--json'], {
-            input: message,
-            signal,
-            timeoutMs: 120000,
-          });
-          if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch send failed'));
           const taskName = sanitizeName(params.name);
-          ensureTask(params.id, {
-            ...(taskName ? { name: taskName } : {}),
-            state: 'running',
-            unhandled: false,
-            startedAt: Date.now(),
-            finishedAt: undefined,
-            error: undefined,
-            heartbeatCount: 0,
+          const delivered = await deliverPrompt(params.id, message, {
+            signal,
+            notify: params.notify !== false,
+            heartbeatMs,
+            name: taskName,
           });
-          const shouldNotify = params.notify !== false;
-          if (shouldNotify) startWatcher(params.id, heartbeatMs);
-          return emit({ id: params.id, accepted: true, notify: shouldNotify });
+          return emit({ id: params.id, ...delivered });
         }
         if (params.op === 'wait') {
           const args = ['wait', params.id, '--json'];

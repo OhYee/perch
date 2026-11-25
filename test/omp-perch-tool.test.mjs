@@ -303,3 +303,184 @@ test('OMP extension hides perch tool inside managed PERCH_MANAGED_WORKER session
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('OMP perch tool defaults to native side pane in TUI mode, discovers new session, and skips close on shutdown', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'perch-omp-native-'));
+  const bin = join(dir, 'fake-perch');
+  const logPath = join(dir, 'calls.jsonl');
+  const launchedMarker = join(dir, 'launched');
+  const releasePath = join(dir, 'release');
+  const nativeScript = `#!${process.execPath}
+const { appendFileSync, existsSync, writeFileSync } = require('node:fs');
+const args = process.argv.slice(2);
+const log = process.env.PERCH_FIXTURE_LOG;
+const launched = process.env.PERCH_FIXTURE_LAUNCHED;
+const release = process.env.PERCH_FIXTURE_RELEASE;
+const chunks = [];
+process.stdin.on('data', chunk => chunks.push(chunk));
+process.stdin.on('end', () => {
+  const stdin = Buffer.concat(chunks).toString('utf8');
+  if (log) appendFileSync(log, JSON.stringify({ args, stdin, workerEnv: process.env.PERCH_MANAGED_WORKER }) + '\\n');
+  const cmd = args[0];
+  if (cmd === 'list') {
+    const rows = [];
+    if (existsSync(launched)) {
+      rows.push({
+        id: 'agy:native-999.0123456789abcdef-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        provider: 'agy',
+        kind: 'session',
+        status: 'idle',
+        send: true,
+        wait: true,
+        history: true,
+        cwd: ${JSON.stringify(dir)},
+      });
+    }
+    console.log(JSON.stringify(rows));
+    return;
+  }
+  if (cmd === 'start' && args.includes('--native')) {
+    writeFileSync(launched, 'ok');
+    console.log(JSON.stringify({ provider: args[1], mode: 'native', pane: { backend: 'tern', id: 'pane-42' } }));
+    return;
+  }
+  if (cmd === 'send') {
+    console.log(JSON.stringify({ accepted: true }));
+    return;
+  }
+  if (cmd === 'wait') {
+    const finish = () => { console.log(JSON.stringify({ id: args[1], status: 'completed' })); process.exit(0); };
+    if (existsSync(release)) return finish();
+    const timer = setInterval(() => { if (existsSync(release)) { clearInterval(timer); finish(); } }, 10);
+    process.on('SIGTERM', () => { clearInterval(timer); process.exit(143); });
+    return;
+  }
+  if (cmd === 'history') {
+    console.log(JSON.stringify([{ role: 'assistant', text: 'Native AGY finished analysis.' }]));
+    return;
+  }
+  process.exit(1);
+});
+`;
+  const previous = {
+    PERCH_BIN: process.env.PERCH_BIN,
+    PERCH_FIXTURE_LOG: process.env.PERCH_FIXTURE_LOG,
+    PERCH_FIXTURE_LAUNCHED: process.env.PERCH_FIXTURE_LAUNCHED,
+    PERCH_FIXTURE_RELEASE: process.env.PERCH_FIXTURE_RELEASE,
+    PERCH_HEARTBEAT_MS: process.env.PERCH_HEARTBEAT_MS,
+    PERCH_NATIVE_DISCOVER_MS: process.env.PERCH_NATIVE_DISCOVER_MS,
+  };
+  await writeFile(bin, nativeScript);
+  await chmod(bin, 0o700);
+  process.env.PERCH_BIN = bin;
+  process.env.PERCH_FIXTURE_LOG = logPath;
+  process.env.PERCH_FIXTURE_LAUNCHED = launchedMarker;
+  process.env.PERCH_FIXTURE_RELEASE = releasePath;
+  process.env.PERCH_HEARTBEAT_MS = '0';
+  process.env.PERCH_NATIVE_DISCOVER_MS = '3000';
+
+  const h = createHarness(dir);
+  h.ctx.mode = 'tui';
+  try {
+    const perch = h.tools.get('perch');
+    const started = await perch.execute('n1', {
+      op: 'start',
+      name: 'native-neon',
+      provider: 'agy',
+      model: 'gemini-4-neon',
+      prompt: 'Analyze repo',
+    }, undefined, undefined, h.ctx);
+    assert.equal(started.details.mode, 'native');
+    assert.deepEqual(started.details.pane, { backend: 'tern', id: 'pane-42' });
+    assert.equal(started.details.id, 'agy:native-999.0123456789abcdef-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    assert.equal(started.details.accepted, true);
+
+    await writeFile(releasePath, 'go');
+    await until(() => h.sentMessages.length === 1);
+    assert.match(h.sentMessages[0].message.content, /Native AGY finished analysis\./);
+    assert.match(h.sentMessages[0].message.content, /Action:/);
+
+    await h.handlers.get('session_shutdown')({}, h.ctx);
+    const calls = (await readFile(logPath, 'utf8')).trim().split('\n').map(JSON.parse);
+    assert.ok(calls.some(c => c.args[0] === 'start' && c.args.includes('--native') && c.args.includes('--pane') && c.args.includes('right')));
+    assert.ok(!calls.some(c => c.args[0] === 'close'), 'native sessions must not be closed via perch close on shutdown');
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('OMP perch tool attaches watcher when send returns deliveryUnknown (accepted: null) and worker is running', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'perch-omp-unknown-'));
+  const bin = join(dir, 'fake-perch');
+  const releasePath = join(dir, 'release');
+  const unknownScript = `#!${process.execPath}
+const { existsSync } = require('node:fs');
+const args = process.argv.slice(2);
+const release = process.env.PERCH_FIXTURE_RELEASE;
+const chunks = [];
+process.stdin.on('data', chunk => chunks.push(chunk));
+process.stdin.on('end', () => {
+  const cmd = args[0];
+  if (cmd === 'send') {
+    console.log(JSON.stringify({ accepted: null }));
+    process.stderr.write('Antigravity CLI did not confirm the prompt; do not resend\\n');
+    process.exit(1);
+  }
+  if (cmd === 'wait') {
+    const timeoutIdx = args.indexOf('--timeout');
+    if (timeoutIdx >= 0 && args[timeoutIdx + 1] === '0') {
+      console.log(JSON.stringify({ id: args[1], status: 'timeout' }));
+      process.exit(2);
+    }
+    const finish = () => { console.log(JSON.stringify({ id: args[1], status: 'completed' })); process.exit(0); };
+    if (existsSync(release)) return finish();
+    const timer = setInterval(() => { if (existsSync(release)) { clearInterval(timer); finish(); } }, 10);
+    process.on('SIGTERM', () => { clearInterval(timer); process.exit(143); });
+    return;
+  }
+  if (cmd === 'history') {
+    console.log(JSON.stringify([{ role: 'assistant', text: 'Recovered slow turn completed.' }]));
+    return;
+  }
+  process.exit(1);
+});
+`;
+  const previous = {
+    PERCH_BIN: process.env.PERCH_BIN,
+    PERCH_FIXTURE_RELEASE: process.env.PERCH_FIXTURE_RELEASE,
+    PERCH_HEARTBEAT_MS: process.env.PERCH_HEARTBEAT_MS,
+  };
+  await writeFile(bin, unknownScript);
+  await chmod(bin, 0o700);
+  process.env.PERCH_BIN = bin;
+  process.env.PERCH_FIXTURE_RELEASE = releasePath;
+  process.env.PERCH_HEARTBEAT_MS = '0';
+
+  const h = createHarness(dir);
+  try {
+    const perch = h.tools.get('perch');
+    const sent = await perch.execute('u1', {
+      op: 'send',
+      id: 'agy:11111111-1111-4111-8111-111111111111',
+      text: 'Long prompt',
+    }, undefined, undefined, h.ctx);
+    assert.equal(sent.details.accepted, null);
+    assert.equal(sent.details.running, true);
+    assert.equal(sent.details.notify, true);
+
+    await writeFile(releasePath, 'go');
+    await until(() => h.sentMessages.length === 1);
+    assert.match(h.sentMessages[0].message.content, /Recovered slow turn completed\./);
+    await h.handlers.get('session_shutdown')({}, h.ctx);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
