@@ -306,7 +306,10 @@ try {
   const stateStat = await lstat(stateDir);
   if (!stateStat.isDirectory() || stateStat.uid !== uid || (stateStat.mode & 0o077)) throw new Error('OMP state directory is not private');
   sessionDir = resuming ? dirname(savedPath) : await mkdtemp(join(stateDir, 'omp-'));
-  child = spawn('omp', ['--mode', 'rpc', '--session-dir', sessionDir, '--approval-mode', 'yolo', ...startupArgs], { stdio: ['pipe', 'pipe', 'ignore'] });
+  child = spawn('omp', ['--mode', 'rpc', '--session-dir', sessionDir, '--approval-mode', 'yolo', ...startupArgs], {
+    stdio: ['pipe', 'pipe', 'ignore'],
+    env: { ...process.env, PERCH_MANAGED_WORKER: '1' },
+  });
   child.stdin.on('error', () => {});
   child.on('error', () => failStartup('Unable to start OMP RPC process'));
   child.on('exit', () => {

@@ -210,3 +210,19 @@ test('OMP perch extension cancels pending async watchers across session switch',
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('OMP extension hides perch tool inside managed PERCH_MANAGED_WORKER sessions', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'perch-omp-worker-guard-'));
+  const previous = process.env.PERCH_MANAGED_WORKER;
+  process.env.PERCH_MANAGED_WORKER = '1';
+  try {
+    const h = createHarness(dir);
+    assert.equal(h.tools.has('perch'), false, 'managed worker must not register perch tool');
+    await h.handlers.get('mode_changed')({ state: { vibe: { status: 'active' } } }, h.ctx);
+    assert.equal(h.getActiveTools().includes('perch'), false, 'managed worker must not activate perch tool in vibe mode');
+  } finally {
+    if (previous === undefined) delete process.env.PERCH_MANAGED_WORKER;
+    else process.env.PERCH_MANAGED_WORKER = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+});

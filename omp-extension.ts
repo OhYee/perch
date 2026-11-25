@@ -283,7 +283,10 @@ export default function (pi: ExtensionAPI) {
     })();
   }
 
+  const isManagedWorker = process.env.PERCH_MANAGED_WORKER === '1';
+
   async function ensureToolActiveInVibe(ctx: ExtensionContext) {
+    if (isManagedWorker) return;
     const anyCtx = ctx as unknown as {
       agent?: { kind?: string };
       sessionModes?: { getState?: () => { vibe?: { status?: string } } };
@@ -323,7 +326,7 @@ export default function (pi: ExtensionAPI) {
     registerTool?: (tool: Record<string, unknown>) => void;
     arktype?: (schema: Record<string, unknown>) => unknown;
   };
-  if (typeof anyPi.registerTool === 'function' && typeof anyPi.arktype === 'function') {
+  if (!isManagedWorker && typeof anyPi.registerTool === 'function' && typeof anyPi.arktype === 'function') {
     const type = anyPi.arktype;
     anyPi.registerTool({
       name: 'perch',

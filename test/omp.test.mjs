@@ -333,7 +333,7 @@ const { existsSync, writeFileSync } = require('node:fs');
 const args = process.argv.slice(2);
 if (args[0] === 'collab') { console.log(JSON.stringify({ version: 1, hosts: [] })); process.exit(0); }
 if (args[0] === 'session') { console.log(JSON.stringify({ held: [], unknown: [] })); process.exit(0); }
-if (args[0] !== '--mode' || args[1] !== 'rpc' || args[2] !== '--session-dir' || !args[3] || args[4] !== '--approval-mode' || args[5] !== 'yolo' || args.includes('--no-ui') || args.includes('--auto-approve')) process.exit(4);
+if (args[0] !== '--mode' || args[1] !== 'rpc' || args[2] !== '--session-dir' || !args[3] || args[4] !== '--approval-mode' || args[5] !== 'yolo' || args.includes('--no-ui') || args.includes('--auto-approve') || process.env.PERCH_MANAGED_WORKER !== '1') process.exit(4);
 const file = join(args[3], 'fixture.jsonl');
 let sessionId = 'fixture-original', busy = false, asyncPending = false, uiTurn, uiDelay = 150, uiLocal = false;
 const messages = [];
