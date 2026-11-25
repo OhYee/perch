@@ -4,17 +4,24 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { createNativeAdapter, macArgv, nativeReceiptDirectory } from '../adapters/agy-native.mjs';
+import { createNativeAdapter, macArgv, nativeReceiptDirectory, parseAgyTranscript } from '../adapters/agy-native.mjs';
 
 const firstPid = 61401;
 const secondPid = 61402;
 const clue = pid => `agy:pid-${pid}`;
 const uuids = ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'];
-const transcriptPath = (home, uuid) => join(home, '.gemini', 'antigravity', 'brain', uuid, '.system_generated', 'logs', 'transcript.jsonl');
+const transcriptPath = (home, uuid, app = 'antigravity') => join(home, '.gemini', app, 'brain', uuid, '.system_generated', 'logs', 'transcript.jsonl');
 const report = (f, uuid, title, extra = {}) => ({
   product: 'antigravity', version: '1.5.16', cwd: f.cwd,
   session_id: uuid, conversation_id: uuid, transcript_path: transcriptPath(f.home, uuid),
   conversation_title: title, agent_state: 'idle', pending_input_count: 0, tool_confirmation_pending: false,
+  ...extra,
+});
+const hookPayload = (f, uuid, event, extra = {}) => ({
+  conversationId: uuid,
+  cwd: f.cwd,
+  transcriptPath: transcriptPath(f.home, uuid, 'antigravity-cli'),
+  hookEventName: event,
   ...extra,
 });
 
@@ -41,6 +48,9 @@ async function fixture(t) {
   const queries = [];
   const beforeInspection = new Map();
   let source;
+  let hookSource;
+  const sent = [];
+  let sendHandler;
   const api = createNativeAdapter({
     // 这里替换 OS 观察，不复制生产绑定或 transcript 校验的逻辑。
     async inspectProcesses(pid) {
@@ -53,14 +63,27 @@ async function fixture(t) {
       return pid === undefined ? [...rows.values()] : [...rows.values()].filter(p => p.pid === pid);
     },
     async inspectStatusSource() { return source; },
+    async inspectHookSource() { return hookSource; },
+    async sendInput(request) {
+      await request.confirm?.();
+      sent.push({ pid: request.pid, mode: request.mode, text: request.text, enter: request.enter, lang: request.lang });
+      if (sendHandler) return await sendHandler(request);
+    },
+    confirmTurnMs: 40,
   });
   return {
-    api, proc, rows, home, cwd, executable, queries, receipts,
+    api, proc, rows, home, cwd, executable, queries, receipts, sent,
+    onSendInput(fn) { sendHandler = fn; },
     beforeNextInspection(pid, fn) { beforeInspection.set(pid, fn); },
     async publish(pid, payload) {
       source = pid;
       try { return await api.recordNativeStatus(payload); }
       finally { source = undefined; }
+    },
+    async publishHook(pid, payload) {
+      hookSource = pid;
+      try { return await api.recordNativeHook(payload); }
+      finally { hookSource = undefined; }
     },
   };
 }
@@ -396,4 +419,159 @@ test('AGY does not follow a substituted receipt symlink when refreshing a native
   assert.equal((await lstat(path)).isSymbolicLink(), true);
   const [row] = await f.api.listNative();
   assertClue(row, firstPid, f.cwd);
+});
+
+test('parseAgyTranscript extracts explicit user requests and visible assistant responses only', () => {
+  const raw = [
+    JSON.stringify({
+      type: 'USER_INPUT',
+      source: 'USER_EXPLICIT',
+      content: '<USER_REQUEST>\nHello AGY\nSecond line\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\ntime\n</ADDITIONAL_METADATA>',
+    }),
+    JSON.stringify({ type: 'PLANNER_RESPONSE', thinking: 'internal thought', tool_calls: [{ name: 'run_command' }] }),
+    JSON.stringify({ type: 'GENERIC', content: 'tool stdout should be skipped' }),
+    JSON.stringify({ type: 'SYSTEM_MESSAGE', content: 'system log should be skipped' }),
+    JSON.stringify({ type: 'PLANNER_RESPONSE', content: 'Done! Here is the answer.' }),
+    JSON.stringify({ type: 'USER_INPUT', source: 'USER_EXPLICIT', content: 'Plain follow-up' }),
+    'not valid json',
+    JSON.stringify({ type: 'PLANNER_RESPONSE', content: 'Second reply' }),
+  ].join('\n');
+  assert.deepEqual(parseAgyTranscript(raw, Infinity), [
+    { role: 'user', text: 'Hello AGY\nSecond line' },
+    { role: 'assistant', text: 'Done! Here is the answer.' },
+    { role: 'user', text: 'Plain follow-up' },
+    { role: 'assistant', text: 'Second reply' },
+  ]);
+  assert.deepEqual(parseAgyTranscript(raw, 2), [
+    { role: 'user', text: 'Plain follow-up' },
+    { role: 'assistant', text: 'Second reply' },
+  ]);
+});
+
+test('AGY hook plugin binds idle native TUI sessions including --dangerously-skip-permissions, reads transcript history, and waits', async t => {
+  const f = await fixture(t);
+  const uuid = uuids[0];
+  f.rows.set(firstPid, f.proc(firstPid, { argv: [f.executable, '--dangerously-skip-permissions', '--model', 'gemini-4-neon'] }));
+
+  // Forged hook without verified parent process must be refused
+  await assert.rejects(() => f.api.recordNativeHook(hookPayload(f, uuid, 'SessionStart')), /hook callback refused/i);
+
+  // SessionStart binds the session persistently across idle periods
+  const started = await f.publishHook(firstPid, hookPayload(f, uuid, 'SessionStart'));
+  assert.deepEqual(started, { conversation: uuid, status: 'idle' });
+
+  const [listed] = await f.api.listNative();
+  assert.equal(listed.kind, 'session');
+  assert.equal(listed.pid, firstPid);
+  assert.equal(listed.status, 'idle');
+  assert.equal(listed.history, true);
+  assert.equal(listed.historyMode, 'persisted');
+  assert.equal(listed.wait, true);
+  assert.equal(listed.send, true);
+  assert.equal(listed.sendReason, undefined);
+  assert.ok(listed.id.endsWith(`-${uuid}`));
+
+  // Before transcript exists on disk, history returns []
+  assert.deepEqual(await f.api.historyNative(listed, 20), []);
+
+  // Write transcript and verify history reads visible messages
+  const path = transcriptPath(f.home, uuid, 'antigravity-cli');
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, [
+    JSON.stringify({ type: 'USER_INPUT', source: 'USER_EXPLICIT', content: '<USER_REQUEST>\nCheck repo\n</USER_REQUEST>' }),
+    JSON.stringify({ type: 'PLANNER_RESPONSE', content: 'Repo looks good.' }),
+  ].join('\n') + '\n', { mode: 0o600 });
+  assert.deepEqual(await f.api.historyNative(listed, 10), [
+    { role: 'user', text: 'Check repo' },
+    { role: 'assistant', text: 'Repo looks good.' },
+  ]);
+
+  // PreInvocation marks running and increments turnSeq; waitNative times out on 0ms, then completes on Stop
+  await f.publishHook(firstPid, hookPayload(f, uuid, 'PreInvocation', { invocationNum: 1 }));
+  const running = await f.api.lookupNative(listed.id);
+  assert.equal(running.status, 'running');
+  assert.equal(running._turnSeq, 1);
+  assert.deepEqual(await f.api.waitNative(running, 0), { status: 'timeout' });
+
+  const waiting = f.api.waitNative(running, 3000);
+  await sleep(30);
+  await f.publishHook(firstPid, hookPayload(f, uuid, 'Stop', { fullyIdle: false }));
+  await sleep(30);
+  await f.publishHook(firstPid, hookPayload(f, uuid, 'Stop', { fullyIdle: true }));
+  assert.deepEqual(await waiting, { status: 'completed' });
+
+  // Process exit causes waitNative to return interrupted
+  await f.publishHook(firstPid, hookPayload(f, uuid, 'PreInvocation', { invocationNum: 2 }));
+  const runningAgain = await f.api.lookupNative(listed.id);
+  const interrupted = f.api.waitNative(runningAgain, 3000);
+  await sleep(30);
+  f.rows.delete(firstPid);
+  const result = await interrupted;
+  assert.equal(result.status, 'interrupted');
+});
+
+test('AGY hook rejects untrusted transcript paths and mismatched cwd', async t => {
+  const f = await fixture(t);
+  const [first, other] = uuids;
+  f.rows.set(firstPid, f.proc(firstPid));
+  for (const extra of [
+    { transcriptPath: transcriptPath(f.home, other, 'antigravity-cli') },
+    { transcriptPath: join(f.home, 'untrusted.jsonl') },
+    { cwd: dirname(f.cwd) },
+    { hookEventName: 'UnknownEvent' },
+  ]) {
+    await f.publishHook(firstPid, hookPayload(f, first, 'SessionStart'));
+    const invalid = await f.publishHook(firstPid, hookPayload(f, first, 'PreInvocation', extra));
+    assert.deepEqual(invalid, { conversation: null, status: 'unknown' });
+    const [row] = await f.api.listNative();
+    assertClue(row, firstPid, f.cwd);
+  }
+});
+
+test('AGY hook-backed native sessions support confirmNativeTui and sendNative for short and multiline prompts', async t => {
+  const f = await fixture(t);
+  const uuid = uuids[0];
+  f.rows.set(firstPid, f.proc(firstPid));
+  await f.publishHook(firstPid, hookPayload(f, uuid, 'SessionStart'));
+  const [session] = await f.api.listNative();
+
+  // Idle hook session confirms safely for text + enter
+  const confirmed = await f.api.confirmNativeTui(session, { mode: 'text', text: 'hello', enter: true });
+  assert.equal(confirmed.id, session.id);
+
+  // Short single-line send injects directly and detects PreInvocation
+  f.onSendInput(async () => {
+    await f.publishHook(firstPid, hookPayload(f, uuid, 'PreInvocation', { invocationNum: 1 }));
+  });
+  await f.api.sendNative(session, 'Summarize git status', { lang: 'zh' });
+  assert.deepEqual(f.sent.at(-1), { pid: firstPid, mode: 'text', text: 'Summarize git status', enter: true, lang: 'zh' });
+
+  // While running, enter and sendNative are rejected before terminal delivery
+  await assert.rejects(() => f.api.confirmNativeTui(session, { mode: 'text', text: 'x', enter: true }), /busy or blocked/i);
+  await assert.rejects(() => f.api.sendNative(session, 'Another prompt'), /busy/i);
+  // Key without enter (e.g. Escape) is still allowed during running
+  await f.api.confirmNativeTui(session, { mode: 'key', text: 'Escape', enter: false });
+
+  // After Stop(fullyIdle: true), multiline prompt stages a private 0600 file and sends single-line reference
+  await f.publishHook(firstPid, hookPayload(f, uuid, 'Stop', { fullyIdle: true }));
+  f.onSendInput(null);
+  const multiline = 'Line 1\nLine 2\nCheck all tests';
+  await f.api.sendNative(session, multiline);
+  const last = f.sent.at(-1);
+  assert.equal(last.enter, true);
+  const match = /^Read and follow the complete instructions in (.+)$/.exec(last.text);
+  assert.ok(match, `expected staged file instruction, got: ${last.text}`);
+  const stagedPath = match[1];
+  const stagedStat = await lstat(stagedPath);
+  assert.equal(stagedStat.isFile(), true);
+  assert.equal(stagedStat.mode & 0o777, 0o600);
+  assert.equal(await readFile(stagedPath, 'utf8'), multiline);
+
+  // Partial terminal failure propagates deliveryUnknown
+  f.onSendInput(async () => {
+    const err = new Error('partial write');
+    err.deliveryUnknown = true;
+    throw err;
+  });
+  await assert.rejects(() => f.api.sendNative(session, 'Check again'), err => err.deliveryUnknown === true);
 });

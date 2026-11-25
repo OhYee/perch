@@ -25,7 +25,7 @@ test('explicit language overrides the environment for help and invalid options',
 });
 
 test('each command has local usage and examples, including nested integration help', () => {
-  for (const topic of ['list', 'start', 'resume', 'send', 'input', 'history', 'view', 'wait', 'close', 'integration', 'integration install', 'integration install omp', 'integration agy-statusline']) {
+  for (const topic of ['list', 'start', 'resume', 'send', 'input', 'history', 'view', 'wait', 'close', 'integration', 'integration install', 'integration install omp', 'integration install agy', 'integration agy-hook', 'integration agy-statusline']) {
     for (const [lang, heading] of [['en', 'Examples:'], ['zh', '示例：']]) {
       const result = spawnSync(process.execPath, [cli, ...topic.split(' '), '--help', '--lang', lang], { encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);
@@ -158,22 +158,22 @@ test('send and input help distinguish provider delivery from native terminal inp
         assert.match(input.stdout, /nonempty, single-line, without control\s+characters[\s\S]*64 KiB in UTF-8/);
         assert.match(input.stdout, /--key cannot be combined with text or --enter/);
         assert.match(input.stdout, /input does not accept --stdin/);
-        assert.match(input.stdout, /native OMP sessions with the rich extension on Tern or tmux/);
+        assert.match(input.stdout, /native OMP sessions with the rich extension and native agy sessions[\s\S]*on Tern, Herdr, or tmux/);
         assert.match(input.stdout, /foreground\s+process match, no input is sent/);
         assert.match(input.stdout, /terminal\s+delivery only[\s\S]*partial delivery[\s\S]*null/);
         assert.match(input.stdout, /running or blocked/);
-        assert.match(input.stdout, /Native agy does not support text, --enter or named keys/);
+        assert.match(input.stdout, /Statusline-only native agy does not support text, --enter or named keys/);
       } else {
         assert.match(input.stdout, /perch input "\$id" '总结当前工作' --enter/);
         assert.match(input.stdout, /普通编辑器已就绪、输入为空且没有弹窗/);
         assert.match(input.stdout, /非空单行文本，不含控制字符（UTF-8 最多 64 KiB）/);
         assert.match(input.stdout, /--key 不能与文本或 --enter 同时使用/);
         assert.match(input.stdout, /input 不支持 --stdin/);
-        assert.match(input.stdout, /Tern 或 tmux 中加载完整扩展的原生 OMP 会话/);
+        assert.match(input.stdout, /Tern、Herdr 或 tmux 中加载完整扩展的原生 OMP 会话/);
         assert.match(input.stdout, /前台进程没有精确匹配，不会发送输入/);
         assert.match(input.stdout, /终端已接收，\s*不表示应用已执行；部分投递[\s\S]*null/);
         assert.match(input.stdout, /running 或 blocked/);
-        assert.match(input.stdout, /原生 agy 不支持文本、--enter 或具名按键/);
+        assert.match(input.stdout, /仅启用状态行的原生 agy 不支持文本、--enter 或具名按键/);
       }
     }
   }
