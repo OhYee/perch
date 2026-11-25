@@ -126,7 +126,27 @@ function nativeEnvironment(provider) {
     if (value === undefined) unset.push('-u', name);
     else assignments.push(`${name}=${paths.has(name) && value ? resolve(value) : value}`);
   }
+  if (provider === 'omp' && process.env.PERCH_MANAGED_WORKER === '1') {
+    assignments.push('PERCH_MANAGED_WORKER=1');
+  }
   return [...unset, ...assignments];
+}
+
+function nativeYoloArgs(provider, providerArgs) {
+  const hasFlag = (...flags) => providerArgs.some(arg => flags.some(flag => arg === flag || arg.startsWith(`${flag}=`)));
+  if (provider === 'agy') return ['--dangerously-skip-permissions'];
+  if (provider === 'omp') {
+    return hasFlag('--approval-mode', '--auto-approve') ? [] : ['--approval-mode', 'yolo'];
+  }
+  if (provider === 'codex') {
+    return hasFlag('--dangerously-bypass-approvals-and-sandbox', '--full-auto', '-a', '--ask-for-approval', '-s', '--sandbox')
+      ? [] : ['--dangerously-bypass-approvals-and-sandbox'];
+  }
+  if (provider === 'claude') {
+    return hasFlag('--permission-mode', '--dangerously-skip-permissions')
+      ? [] : ['--permission-mode', 'bypassPermissions', '--dangerously-skip-permissions'];
+  }
+  return [];
 }
 
 async function launchPane(values, session, provider, cwd, nativeExecutable, initialPrompt, providerArgs = []) {
@@ -134,6 +154,7 @@ async function launchPane(values, session, provider, cwd, nativeExecutable, init
   if (values.pane !== 'right') args.push('--backend', values.pane, '--session', values.workspace, '--tab', values.tab);
   if (nativeExecutable) {
     args.push('--cwd', cwd, '--', '/usr/bin/env', ...nativeEnvironment(provider), nativeExecutable);
+    args.push(...nativeYoloArgs(provider, providerArgs));
     if (values.model !== undefined) args.push('--model', values.model);
     args.push(...providerArgs);
     if (initialPrompt !== undefined) {

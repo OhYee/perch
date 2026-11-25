@@ -54,7 +54,12 @@ test('native initial prompts cross the launcher as one unchanged provider positi
   assert.equal(subcommand.status, 0, subcommand.stderr);
   const noPrompt = f.run('start', 'omp', '--native', '--pane', 'right');
   assert.equal(noPrompt.status, 0, noPrompt.stderr);
-  assert.deepEqual(await f.providers(), [['--model', 'some-model:xhigh', '--extension', extension, '--', prompt], ['--help'], ['--', 'exec'], []]);
+  assert.deepEqual(await f.providers(), [
+    ['--approval-mode', 'yolo', '--model', 'some-model:xhigh', '--extension', extension, '--', prompt],
+    ['--dangerously-bypass-approvals-and-sandbox', '--help'],
+    ['--dangerously-bypass-approvals-and-sandbox', '--', 'exec'],
+    ['--approval-mode', 'yolo'],
+  ]);
   const panes = await f.panes();
   assert.equal(panes.length, 4);
   assert.deepEqual(panes[0].slice(0, 4), ['--mode', 'right', '--cwd', process.cwd()]);
@@ -69,7 +74,7 @@ test('Claude native launch uses the same provider option boundary', async t => {
   assert.equal(result.status, 0, result.stderr);
   const [args] = await f.panes();
   assert.deepEqual(args.slice(0, 8), ['--mode', 'right', '--backend', 'tern', '--session', 'work', '--tab', 'agents']);
-  assert.deepEqual(args.slice(-4), ['--model', 'model', '--', 'hello']);
+  assert.deepEqual(args.slice(-7), ['--permission-mode', 'bypassPermissions', '--dangerously-skip-permissions', '--model', 'model', '--', 'hello']);
   assert.deepEqual(await f.providers(), []);
 });
 
@@ -120,7 +125,10 @@ test('AGY native launches an interactive argv with an optional literal prompt an
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), { provider: 'agy', mode: 'native', pane: { backend: 'tern', id: 'test-pane' } });
   }
-  assert.deepEqual(await f.providers(), [['--model', 'fixture-model', `--prompt-interactive=${prompt}`], []]);
+  assert.deepEqual(await f.providers(), [
+    ['--dangerously-skip-permissions', '--model', 'fixture-model', `--prompt-interactive=${prompt}`],
+    ['--dangerously-skip-permissions'],
+  ]);
   const panes = await f.panes();
   assert.equal(panes.length, 2);
   for (const argv of panes) {
