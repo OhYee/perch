@@ -288,8 +288,11 @@ function validTranscriptPath(id, candidate) {
   if (typeof id !== 'string' || !conversationId.test(id) || typeof candidate !== 'string' || !isAbsolute(candidate)) return null;
   const gemini = join(resolve(homedir()), '.gemini');
   for (const app of ['antigravity-cli', 'antigravity', 'antigravity-ide']) {
-    const expected = join(gemini, app, 'brain', id, '.system_generated', 'logs', 'transcript.jsonl');
-    if (candidate === expected) return expected;
+    const logsDir = join(gemini, app, 'brain', id, '.system_generated', 'logs');
+    for (const filename of ['transcript_full.jsonl', 'transcript.jsonl']) {
+      const expected = join(logsDir, filename);
+      if (candidate === expected) return expected;
+    }
   }
   return null;
 }
@@ -343,8 +346,9 @@ async function hookReportFrom(input, row, observedAt) {
   const event = input?.hookEventName;
   const cwdOk = row.cwd && await sameDirectory(input?.cwd, row.cwd);
   const valid = transcriptPath !== null && hookEvents.has(event) && cwdOk;
+  const hasPendingTurn = event === 'SessionStart' && typeof input?.lastUserInput === 'string' && input.lastUserInput.trim().length > 0;
   const status = !valid ? 'unknown'
-    : event === 'PreInvocation' ? 'running'
+    : event === 'PreInvocation' || hasPendingTurn ? 'running'
       : event === 'Stop' && input?.fullyIdle === false ? 'running'
         : 'idle';
   return {

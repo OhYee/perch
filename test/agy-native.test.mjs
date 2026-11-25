@@ -10,7 +10,8 @@ const firstPid = 61401;
 const secondPid = 61402;
 const clue = pid => `agy:pid-${pid}`;
 const uuids = ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'];
-const transcriptPath = (home, uuid, app = 'antigravity') => join(home, '.gemini', app, 'brain', uuid, '.system_generated', 'logs', 'transcript.jsonl');
+const transcriptPath = (home, uuid, app = 'antigravity', file = 'transcript.jsonl') =>
+  join(home, '.gemini', app, 'brain', uuid, '.system_generated', 'logs', file);
 const report = (f, uuid, title, extra = {}) => ({
   product: 'antigravity', version: '1.5.16', cwd: f.cwd,
   session_id: uuid, conversation_id: uuid, transcript_path: transcriptPath(f.home, uuid),
@@ -20,7 +21,7 @@ const report = (f, uuid, title, extra = {}) => ({
 const hookPayload = (f, uuid, event, extra = {}) => ({
   conversationId: uuid,
   cwd: f.cwd,
-  transcriptPath: transcriptPath(f.home, uuid, 'antigravity-cli'),
+  transcriptPath: transcriptPath(f.home, uuid, 'antigravity-cli', 'transcript_full.jsonl'),
   hookEventName: event,
   ...extra,
 });
@@ -474,8 +475,8 @@ test('AGY hook plugin binds idle native TUI sessions including --dangerously-ski
   // Before transcript exists on disk, history returns []
   assert.deepEqual(await f.api.historyNative(listed, 20), []);
 
-  // Write transcript and verify history reads visible messages
-  const path = transcriptPath(f.home, uuid, 'antigravity-cli');
+  // Write transcript_full.jsonl and verify history reads visible messages
+  const path = transcriptPath(f.home, uuid, 'antigravity-cli', 'transcript_full.jsonl');
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, [
     JSON.stringify({ type: 'USER_INPUT', source: 'USER_EXPLICIT', content: '<USER_REQUEST>\nCheck repo\n</USER_REQUEST>' }),
@@ -485,6 +486,11 @@ test('AGY hook plugin binds idle native TUI sessions including --dangerously-ski
     { role: 'user', text: 'Check repo' },
     { role: 'assistant', text: 'Repo looks good.' },
   ]);
+
+  // SessionStart with lastUserInput immediately marks running (prevents premature wait completion)
+  const withPrompt = await f.publishHook(firstPid, hookPayload(f, uuid, 'SessionStart', { lastUserInput: 'Initial task' }));
+  assert.deepEqual(withPrompt, { conversation: uuid, status: 'running' });
+  assert.deepEqual(await f.api.waitNative(listed, 0), { status: 'timeout' });
 
   // PreInvocation marks running and increments turnSeq; waitNative times out on 0ms, then completes on Stop
   await f.publishHook(firstPid, hookPayload(f, uuid, 'PreInvocation', { invocationNum: 1 }));

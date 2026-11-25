@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:net';
-import { existsSync, mkdirSync, lstatSync, chmodSync, realpathSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, lstatSync, chmodSync, openSync, writeFileSync, closeSync, realpathSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -16,7 +16,7 @@ const MAX_CLI_STDOUT = 16 * 1024 * 1024;
 const MAX_NOTIFICATION_CHARS = 4000;
 const MAX_HEARTBEAT_PREVIEW_CHARS = 600;
 const DEFAULT_HEARTBEAT_SECONDS = 180;
-const DEFAULT_NATIVE_DISCOVER_MS = 15000;
+const DEFAULT_NATIVE_DISCOVER_MS = 20000;
 
 type PerchToolParams = {
   op: string;
@@ -217,6 +217,27 @@ function resolveNativeDiscoverMs(): number {
 function canonicalDir(value: string | undefined): string | null {
   if (!value) return null;
   try { return realpathSync(value); } catch { return resolve(value); }
+}
+
+function stageAgyNativePrompt(uid: number, text: string): string {
+  const promptDir = join(process.platform === 'darwin' ? '/private/tmp' : '/tmp', `agent-session-agy-prompts-${uid}`);
+  try {
+    mkdirSync(promptDir, { mode: 0o700 });
+  } catch (error: unknown) {
+    if (!(error instanceof Error) || !('code' in error) || error.code !== 'EEXIST') throw error;
+  }
+  const info = lstatSync(promptDir);
+  if (!info.isDirectory() || info.uid !== uid || (info.mode & 0o077) !== 0) {
+    throw new Error('Private prompt staging directory is unavailable');
+  }
+  const filePath = join(promptDir, `msg-${randomBytes(12).toString('hex')}.md`);
+  const fd = openSync(filePath, 'wx', 0o600);
+  try {
+    writeFileSync(fd, text, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+  return filePath;
 }
 
 function formatNotification(
@@ -726,10 +747,18 @@ export default function (pi: ExtensionAPI) {
           if (useNative) {
             const pane = params.pane ?? 'right';
             if (!PANES.has(pane)) throw new Error(`Unsupported pane: ${pane}`);
+            // Native agy only emits its SessionStart hook once a first turn starts, and macOS
+            // ps flattens argv on spaces; pass a zero-space file reference via --prompt-interactive
+            // so the TUI starts Turn 1 immediately while staying 100% discoverable on macOS.
+            const agyInlineLaunchPrompt = params.provider === 'agy' && params.prompt !== undefined
+              ? `请阅读并严格执行该文件中的完整指令:${stageAgyNativePrompt(uid, params.prompt)}`
+              : undefined;
             const nativeResult = await withNativeLaunchLock(params.provider, async () => {
               const beforeRows = await listProviderSessions(params.provider!, signal);
               const beforeIds = new Set(beforeRows.map(r => r?.id).filter((v): v is string => typeof v === 'string'));
-              const nativeArgs = ['start', params.provider!, '--native', '--pane', pane, '--cwd', cwd, '--json'];
+              const nativeArgs = ['start', params.provider!];
+              if (agyInlineLaunchPrompt !== undefined) nativeArgs.push(agyInlineLaunchPrompt);
+              nativeArgs.push('--native', '--pane', pane, '--cwd', cwd, '--json');
               if (params.model) nativeArgs.push('--model', params.model);
               if (params.executable) nativeArgs.push('--executable', params.executable);
               if (params.workspace) nativeArgs.push('--workspace', params.workspace);
@@ -743,6 +772,9 @@ export default function (pi: ExtensionAPI) {
                 throw new Error(cliErrorMessage(startedResult, 'perch start --native failed'));
               }
               const started = parseJson(startedResult.stdout) as { provider?: string; mode?: string; pane?: unknown };
+              if (params.provider === 'agy' && agyInlineLaunchPrompt === undefined) {
+                return { fallback: false as const, id: undefined, started, promptAlreadyDelivered: false };
+              }
               const discoveredId = await waitForNewNativeSession(params.provider!, cwd, beforeIds, signal);
               if (!discoveredId) {
                 throw new Error(`Native ${params.provider} pane opened, but no controllable session registered in time. Ensure perch integration install ${params.provider} is active, or retry with native=false.`);
@@ -753,15 +785,42 @@ export default function (pi: ExtensionAPI) {
                 mode: 'native',
                 ...(params.model ? { model: params.model } : {}),
                 cwd,
-                state: 'idle',
+                state: agyInlineLaunchPrompt !== undefined ? 'running' : 'idle',
                 unhandled: false,
+                ...(agyInlineLaunchPrompt !== undefined ? { startedAt: Date.now(), finishedAt: undefined } : {}),
                 error: undefined,
                 heartbeatCount: 0,
               });
-              return { fallback: false as const, id: discoveredId, started };
+              return {
+                fallback: false as const,
+                id: discoveredId,
+                started,
+                promptAlreadyDelivered: agyInlineLaunchPrompt !== undefined,
+              };
             });
             if (!nativeResult.fallback) {
-              const { id, started } = nativeResult;
+              const { id, started, promptAlreadyDelivered } = nativeResult;
+              if (!id) {
+                return emit({
+                  provider: params.provider,
+                  mode: 'native',
+                  pane: started.pane,
+                  ...(taskName ? { name: taskName } : {}),
+                });
+              }
+              if (promptAlreadyDelivered) {
+                const shouldNotify = params.notify !== false;
+                if (shouldNotify) startWatcher(id, heartbeatMs);
+                return emit({
+                  id,
+                  provider: params.provider,
+                  mode: 'native',
+                  pane: started.pane,
+                  ...(taskName ? { name: taskName } : {}),
+                  accepted: true,
+                  notify: shouldNotify,
+                });
+              }
               if (params.prompt !== undefined) {
                 const delivered = await deliverPrompt(id, params.prompt, {
                   signal,

@@ -402,7 +402,14 @@ process.stdin.on('end', () => {
 
     await h.handlers.get('session_shutdown')({}, h.ctx);
     const calls = (await readFile(logPath, 'utf8')).trim().split('\n').map(JSON.parse);
-    assert.ok(calls.some(c => c.args[0] === 'start' && c.args.includes('--native') && c.args.includes('--pane') && c.args.includes('right')));
+    const startCall = calls.find(c => c.args[0] === 'start' && c.args.includes('--native') && c.args.includes('--pane') && c.args.includes('right'));
+    assert.ok(startCall, 'expected native start call');
+    // AGY native launch with prompt passes a zero-space staged file reference as positional prompt and does not double-send.
+    assert.ok(!startCall.args[2].includes(' '), 'staged AGY launch prompt must have no spaces for macOS argv discovery');
+    const stagedMatch = /:(\S+\.md)$/.exec(startCall.args[2]);
+    assert.ok(stagedMatch, `expected staged prompt path in ${startCall.args[2]}`);
+    assert.equal(await readFile(stagedMatch[1], 'utf8'), 'Analyze repo');
+    assert.ok(!calls.some(c => c.args[0] === 'send'), 'AGY native launch must not send duplicate prompt');
     assert.ok(!calls.some(c => c.args[0] === 'close'), 'native sessions must not be closed via perch close on shutdown');
   } finally {
     for (const [key, value] of Object.entries(previous)) {
