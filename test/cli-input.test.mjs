@@ -41,11 +41,12 @@ function fixture(t) {
     const [managed, native, processHint] = ${JSON.stringify([agyManaged, agyNative, agyProcess])};
     function row(id) {
       const mode = id === managed ? 'managed' : id === native ? 'native' : 'process';
-      return { id, provider: 'agy', _agy: mode, _fixture: 'hidden-value',
+      const hookEnabled = mode === 'native' && process.env.AGY_NATIVE_HOOK === '1';
+      return { id, provider: 'agy', _agy: mode, _nativeSource: hookEnabled ? 'hook' : 'statusline', _fixture: 'hidden-value',
         pid: mode === 'process' ? 357 : 123, kind: mode === 'process' ? 'process' : 'session',
         status: mode === 'process' ? 'unknown' : 'idle', title: null, cwd: null,
-        send: mode === 'managed', wait: mode === 'managed', close: mode === 'managed', history: mode === 'managed',
-        historyMode: mode === 'managed' ? 'live' : undefined };
+        send: mode === 'managed' || hookEnabled, wait: mode === 'managed' || hookEnabled, close: mode === 'managed', history: mode === 'managed' || hookEnabled,
+        historyMode: mode === 'managed' ? 'live' : hookEnabled ? 'persisted' : undefined };
     }
     export async function list() { record(['agy:list']); return [managed, native, processHint].map(row); }
     export async function lookupBridge(id) { record(['agy:bridge', id]); return id === managed ? row(id) : null; }
@@ -54,6 +55,7 @@ function fixture(t) {
     export async function history(session) { record(['agy:history', session.id]); }
     export async function confirmNativeTui(session, action) {
       record(['agy:confirm', session.id, action]);
+      if (session._nativeSource === 'hook') return session;
       throw Error('AGY native input is unavailable: the status line does not prove the editor can accept input safely');
     }
     export async function recordNativeStatus(report) { record(['agy:status', report]); return 'AGY fixture'; }
@@ -281,4 +283,25 @@ test('AGY hook accepts piped JSON object, prints {}, and clears invalid reports 
     assert.doesNotMatch(rejected.stdout + rejected.stderr, /fixture-hook-private/);
     assert.deepEqual(f.calls().at(-1), ['agy:hook', null]);
   }
+});
+
+test('AGY CLI allows input and send for hook-backed native sessions once confirmed', t => {
+  const f = fixture(t);
+  const inputResult = f.run(['input', agyNative, 'hello', '--enter', '--json'], { AGY_NATIVE_HOOK: '1' });
+  assert.equal(inputResult.status, 0, inputResult.stderr);
+  assert.deepEqual(JSON.parse(inputResult.stdout), { accepted: true });
+  assert.deepEqual(f.calls(), [
+    ['agy:native', agyNative],
+    ['agy:confirm', agyNative, { mode: 'text', text: 'hello', enter: true }],
+    ['agy:confirm', agyNative, { mode: 'text', text: 'hello', enter: true }],
+    ['terminal', 123, 'text', 'hello', true],
+  ]);
+
+  const sendResult = f.run(['send', agyNative, 'Check build', '--json'], { AGY_NATIVE_HOOK: '1' });
+  assert.equal(sendResult.status, 0, sendResult.stderr);
+  assert.deepEqual(JSON.parse(sendResult.stdout), { accepted: true });
+  assert.deepEqual(f.calls().slice(-2), [
+    ['agy:native', agyNative],
+    ['agy:send', agyNative, 'Check build'],
+  ]);
 });

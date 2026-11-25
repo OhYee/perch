@@ -62,6 +62,8 @@ const chinese = new Map(Object.entries({
   'Requested Antigravity CLI model is unavailable': '指定的 Antigravity CLI 模型不可用',
   'Antigravity CLI did not confirm the requested model': 'Antigravity CLI 未确认所选模型',
   'Antigravity CLI managed session is busy': 'Antigravity CLI 托管会话正在执行上一轮任务',
+  'Antigravity CLI native session is busy': 'Antigravity CLI 原生会话正在执行上一轮任务',
+  'input --enter is unavailable while the AGY session is busy or blocked': 'AGY 会话忙碌或阻塞时不能使用 input --enter',
   'Antigravity CLI managed session is no longer running': 'Antigravity CLI 托管会话已停止',
   'Antigravity CLI managed session is closing': 'Antigravity CLI 托管会话正在关闭',
   'Antigravity CLI rejected the prompt': 'Antigravity CLI 拒绝了消息',

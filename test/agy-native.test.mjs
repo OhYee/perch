@@ -49,6 +49,8 @@ async function fixture(t) {
   const beforeInspection = new Map();
   let source;
   let hookSource;
+  const sent = [];
+  let sendHandler;
   const api = createNativeAdapter({
     // 这里替换 OS 观察，不复制生产绑定或 transcript 校验的逻辑。
     async inspectProcesses(pid) {
@@ -62,9 +64,16 @@ async function fixture(t) {
     },
     async inspectStatusSource() { return source; },
     async inspectHookSource() { return hookSource; },
+    async sendInput(request) {
+      await request.confirm?.();
+      sent.push({ pid: request.pid, mode: request.mode, text: request.text, enter: request.enter, lang: request.lang });
+      if (sendHandler) return await sendHandler(request);
+    },
+    confirmTurnMs: 40,
   });
   return {
-    api, proc, rows, home, cwd, executable, queries, receipts,
+    api, proc, rows, home, cwd, executable, queries, receipts, sent,
+    onSendInput(fn) { sendHandler = fn; },
     beforeNextInspection(pid, fn) { beforeInspection.set(pid, fn); },
     async publish(pid, payload) {
       source = pid;
@@ -458,6 +467,8 @@ test('AGY hook plugin binds idle native TUI sessions including --dangerously-ski
   assert.equal(listed.history, true);
   assert.equal(listed.historyMode, 'persisted');
   assert.equal(listed.wait, true);
+  assert.equal(listed.send, true);
+  assert.equal(listed.sendReason, undefined);
   assert.ok(listed.id.endsWith(`-${uuid}`));
 
   // Before transcript exists on disk, history returns []
@@ -515,4 +526,52 @@ test('AGY hook rejects untrusted transcript paths and mismatched cwd', async t =
     const [row] = await f.api.listNative();
     assertClue(row, firstPid, f.cwd);
   }
+});
+
+test('AGY hook-backed native sessions support confirmNativeTui and sendNative for short and multiline prompts', async t => {
+  const f = await fixture(t);
+  const uuid = uuids[0];
+  f.rows.set(firstPid, f.proc(firstPid));
+  await f.publishHook(firstPid, hookPayload(f, uuid, 'SessionStart'));
+  const [session] = await f.api.listNative();
+
+  // Idle hook session confirms safely for text + enter
+  const confirmed = await f.api.confirmNativeTui(session, { mode: 'text', text: 'hello', enter: true });
+  assert.equal(confirmed.id, session.id);
+
+  // Short single-line send injects directly and detects PreInvocation
+  f.onSendInput(async () => {
+    await f.publishHook(firstPid, hookPayload(f, uuid, 'PreInvocation', { invocationNum: 1 }));
+  });
+  await f.api.sendNative(session, 'Summarize git status', { lang: 'zh' });
+  assert.deepEqual(f.sent.at(-1), { pid: firstPid, mode: 'text', text: 'Summarize git status', enter: true, lang: 'zh' });
+
+  // While running, enter and sendNative are rejected before terminal delivery
+  await assert.rejects(() => f.api.confirmNativeTui(session, { mode: 'text', text: 'x', enter: true }), /busy or blocked/i);
+  await assert.rejects(() => f.api.sendNative(session, 'Another prompt'), /busy/i);
+  // Key without enter (e.g. Escape) is still allowed during running
+  await f.api.confirmNativeTui(session, { mode: 'key', text: 'Escape', enter: false });
+
+  // After Stop(fullyIdle: true), multiline prompt stages a private 0600 file and sends single-line reference
+  await f.publishHook(firstPid, hookPayload(f, uuid, 'Stop', { fullyIdle: true }));
+  f.onSendInput(null);
+  const multiline = 'Line 1\nLine 2\nCheck all tests';
+  await f.api.sendNative(session, multiline);
+  const last = f.sent.at(-1);
+  assert.equal(last.enter, true);
+  const match = /^Read and follow the complete instructions in (.+)$/.exec(last.text);
+  assert.ok(match, `expected staged file instruction, got: ${last.text}`);
+  const stagedPath = match[1];
+  const stagedStat = await lstat(stagedPath);
+  assert.equal(stagedStat.isFile(), true);
+  assert.equal(stagedStat.mode & 0o777, 0o600);
+  assert.equal(await readFile(stagedPath, 'utf8'), multiline);
+
+  // Partial terminal failure propagates deliveryUnknown
+  f.onSendInput(async () => {
+    const err = new Error('partial write');
+    err.deliveryUnknown = true;
+    throw err;
+  });
+  await assert.rejects(() => f.api.sendNative(session, 'Check again'), err => err.deliveryUnknown === true);
 });

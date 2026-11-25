@@ -72,10 +72,10 @@ Source checkouts are never overwritten by release files.`,
 --json emits machine-readable output. Session status values are:
   idle | running | blocked | failed | stopped | unknown
 Status is reported by the host and does not guarantee a verifiable local process.
-Recognized native agy TUIs appear as process clues unless a verified status
-line report identifies the current conversation during the query (macOS, agy
-1.5.16). On macOS, ambiguous startup arguments, including values with spaces,
-can hide the process entirely. Archived agy conversations are not listed.`,
+Recognized native agy TUIs appear as process clues unless the Perch agy plugin
+(perch integration install agy) or a verified status line report identifies the
+current conversation. On macOS, ambiguous startup arguments, including values
+with spaces, can hide the process entirely. Archived agy conversations are not listed.`,
       examples: 'perch list --provider omp --json\nperch list --provider agy',
     },
     zh: {
@@ -84,7 +84,7 @@ can hide the process entirely. Archived agy conversations are not listed.`,
 --json 输出机器可读数据。会话 status 枚举：
   idle | running | blocked | failed | stopped | unknown
 状态由宿主报告，不保证存在可验证的本机进程。
-可识别的原生 agy TUI 默认只显示进程线索；macOS 的 agy 1.5.16 可在查询期间通过有效状态行报告识别当前对话。
+可识别的原生 agy TUI 默认只显示进程线索；安装 Perch 的 agy 插件（perch integration install agy）或在 macOS agy 1.5.16 中启用状态行后，可识别当前对话。
 macOS 上，启动参数解析不明确时（例如参数值包含空格），连进程线索也可能不显示。
 不列出归档对话。`,
       examples: 'perch list --provider omp --json\nperch list --provider agy',
@@ -226,7 +226,9 @@ For managed OMP, slash-leading prompts are forwarded unchanged, including
 /skill: prompts after the first turn. Execution depends on OMP RPC support and
 may differ from its TUI. A session identity change invalidates the handle; use
 list to obtain the current ID. Submission does not wait for a reply or approve
-permission requests. Native agy sessions do not support send.`,
+permission requests. Plugin-enabled native agy sessions deliver prompts via the
+verified terminal pane (staging multiline or long prompts to a private file);
+statusline-only native agy sessions do not support send.`,
       examples: `# Set id to an existing session ID from list or start first.
 printf '%s\\n' 'Summarize the current work' | perch send "$id" --stdin
 perch send "$id" '/skill:example'`,
@@ -240,7 +242,8 @@ send 使用提供方的消息投递通道，不根据文本推断意图，也不
 结果未知时先检查会话，不要自动重试。
 托管 OMP 的斜杠开头提示词原样转发，包括第一轮之后的 /skill: 提示词。
 能否执行取决于 OMP RPC 支持，可能与 TUI 不同。会话身份变化会使句柄失效，
-请通过 list 获取当前 ID。投递不等待回复，也不会批准权限请求。原生 agy 会话不支持 send。`,
+请通过 list 获取当前 ID。投递不等待回复，也不会批准权限请求。
+安装 hook 插件的原生 agy 会话通过已校验的终端窗格投递消息（多行或长消息写入私有临时文件后引用）；仅启用状态行的原生 agy 会话不支持 send。`,
       examples: `# 先将 id 设为 list 或 start 返回的已有会话 ID。
 printf '%s\\n' '总结当前工作' | perch send "$id" --stdin
 perch send "$id" '/skill:example'`,
@@ -248,45 +251,45 @@ perch send "$id" '/skill:example'`,
   },
   input: {
     en: {
-      purpose: 'Send text or a single key to a native OMP terminal.',
+      purpose: 'Send text or a single key to a native OMP or AGY terminal.',
       details: `Before input, ensure the ordinary editor is ready, its input is empty, and no popup
 is open. Text is written literally: it must be nonempty, single-line, without control
 characters, and at most 64 KiB in UTF-8. Add --enter to press Enter after the text;
-this combination is rejected while OMP reports running or blocked.
+this combination is rejected while the session reports running or blocked.
 --key names are case-insensitive: Enter, Escape, Tab, Backspace, Up, Down, Left, Right, Ctrl+Q, Ctrl+Enter.
 --key cannot be combined with text or --enter. input does not accept --stdin;
 use -- to end options when needed. /vibe toggles a mode; repeating it toggles it back.
-Input is only for native OMP sessions with the rich extension on Tern or tmux,
-using a full session ID and an exact live session-identity handshake. Managed
-sessions and read-only viewers are unsupported. If there is no exact foreground
-process match, no input is sent.
-Native agy does not support text, --enter or named keys: its status line cannot
-verify editor focus or exclude a permission prompt. Use the original terminal.
+Input supports native OMP sessions with the rich extension and native agy sessions
+with the Perch hook plugin on Tern, Herdr, or tmux, using a full session ID and
+verified live process identity. Managed sessions and read-only viewers are unsupported.
+If there is no exact foreground process match, no input is sent.
+Statusline-only native agy does not support text, --enter or named keys: its status
+line cannot verify editor focus or exclude a permission prompt. Use the original terminal.
 --json reports accepted: true, false, or null (delivery unknown). True means terminal
 delivery only, not that the application acted on it; partial delivery or a transport
 failure after writing can yield null. False and unknown exit nonzero. If delivery is
 unknown, check the session before acting; do not retry automatically.`,
-      examples: `# Set id to an existing native OMP session ID from list first.
+      examples: `# Set id to an existing native OMP or AGY session ID from list first.
 perch input "$id" 'Summarize the current work' --enter
 perch input "$id" '/vibe' --enter
 perch input "$id" 'Check the new alert after this task'
 perch input "$id" --key Ctrl+Q`,
     },
     zh: {
-      purpose: '向原生 OMP 终端输入文本或单个按键。',
+      purpose: '向原生 OMP 或 AGY 终端输入文本或单个按键。',
       details: `输入前请确认普通编辑器已就绪、输入为空且没有弹窗。
 文本原样输入，必须为非空单行文本，不含控制字符（UTF-8 最多 64 KiB）；
-加 --enter 可在输入后按 Enter。OMP 报告 running 或 blocked 时会拒绝此组合。
+加 --enter 可在输入后按 Enter。会话报告 running 或 blocked 时会拒绝此组合。
 --key 的键名不区分大小写：Enter、Escape、Tab、Backspace、Up、Down、Left、Right、Ctrl+Q、Ctrl+Enter。
 --key 不能与文本或 --enter 同时使用。input 不支持 --stdin；需要时可用 -- 结束选项。
 /vibe 会切换模式，再执行一次会切换回来。
-输入仅支持 Tern 或 tmux 中加载完整扩展的原生 OMP 会话，须使用完整会话 ID 和精确的实时
-会话身份握手；不支持托管会话或只读查看器。若前台进程没有精确匹配，不会发送输入。
-agy 状态行无法确认编辑器焦点或排除权限弹窗。原生 agy 不支持文本、--enter 或具名按键，请使用原终端。
+输入支持 Tern、Herdr 或 tmux 中加载完整扩展的原生 OMP 会话，以及安装 Perch hook 插件的原生 agy 会话，
+须使用完整会话 ID 并通过实时会话身份核验；不支持托管会话或只读查看器。若前台进程没有精确匹配，不会发送输入。
+仅启用状态行的原生 agy 不支持文本、--enter 或具名按键（状态行无法确认编辑器焦点或排除权限弹窗），请使用原终端。
 --json 返回 accepted：true、false 或 null（投递结果未知）。true 只表示终端已接收，
 不表示应用已执行；部分投递或写入后的传输失败可能返回 null。false 和 null 均以非零状态退出。
 结果未知时先检查会话，不要自动重试。`,
-      examples: `# 先将 id 设为 list 返回的已有原生 OMP 会话 ID。
+      examples: `# 先将 id 设为 list 返回的已有原生 OMP 或 AGY 会话 ID。
 perch input "$id" '总结当前工作' --enter
 perch input "$id" '/vibe' --enter
 perch input "$id" '完成当前任务后再查这条新告警'
@@ -303,7 +306,8 @@ Managed agy retains up to 1,024 messages and 4 MiB of chat text. The default
 and --limit can return fewer messages. A running reply can appear while it
 streams; if it exceeds the retention limit, it is removed rather than kept
 as a partial message. --all fails if any messages were omitted or evicted.
-Native agy history is unavailable: Perch cannot verify the current transcript.`,
+Plugin-enabled native agy sessions read persisted history from transcript.jsonl;
+statusline-only native agy history remains unavailable.`,
       examples: `# Set id to an existing session ID from list or start first.
 perch history "$id" --limit 2`,
     },
@@ -314,7 +318,7 @@ perch history "$id" --limit 2`,
 --json 输出结构化消息。托管 agy 最多保留 1,024 条、合计 4 MiB 的聊天文本。
 默认或使用 --limit 时，返回的条数可能更少。回复生成时可看到实时文本；
 如果回复超出保留上限，就会移除整条回复，而不是保留半条；
-如果有消息被省略或淘汰，--all 会报错。Perch 无法验证原生 agy TUI 的当前会话记录，因此不读取其历史。`,
+如果有消息被省略或淘汰，--all 会报错。安装 hook 插件的原生 agy 会话从 transcript.jsonl 读取持久化历史；仅启用状态行的原生 agy 不读取历史。`,
       examples: `# 先将 id 设为 list 或 start 返回的已有会话 ID。
 perch history "$id" --limit 2`,
     },
@@ -430,14 +434,17 @@ with async completion follow-up notifications and automatic cleanup on exit.
       purpose: 'Install the native Antigravity CLI plugin for Perch.',
       details: `Writes plugin.json and hooks.json to ~/.gemini/config/plugins/perch (or
 $AGY_CONFIG_DIR/plugins/perch) to register SessionStart, PreInvocation, and Stop
-hooks. Existing foreign files or symlinks are never overwritten; restart a running
-agy TUI to load the plugin. --json returns the installation result and path.`,
+hooks. Enables native agy discovery, persisted history, wait, input, and send
+(via Tern, Herdr, or tmux pane input). Existing foreign files or symlinks are
+never overwritten; restart a running agy TUI to load the plugin.
+--json returns the installation result and path.`,
       examples: 'perch integration install agy --json',
     },
     zh: {
       purpose: '安装原生 Antigravity CLI 的 Perch 插件。',
       details: `在 ~/.gemini/config/plugins/perch（或 $AGY_CONFIG_DIR/plugins/perch）写入
 plugin.json 和 hooks.json，注册 SessionStart、PreInvocation 和 Stop 生命周期 hook。
+启用后可为原生 agy 提供会话发现、持久化历史读取、wait、input 和 send（经由 Tern、Herdr 或 tmux 窗格输入）。
 不会覆盖已有的其他文件或符号链接；运行中的 agy TUI 需要重启才能加载插件。
 --json 返回安装结果和路径。`,
       examples: 'perch integration install agy --json',

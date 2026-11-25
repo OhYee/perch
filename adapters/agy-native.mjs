@@ -8,12 +8,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { processes } from './processes.mjs';
 import { entry } from '../portable-runtime.mjs';
+import { sendTerminalInput } from '../terminal-input.mjs';
 
 const exec = promisify(execFile);
 const uid = process.getuid();
 const nativeIdentityUnavailable = 'AGY native session identity is unavailable; the current conversation could not be verified';
 const nativeHistoryUnavailable = 'AGY native history is unavailable: the current transcript could not be verified';
 const nativeInputUnavailable = 'AGY native input is unavailable: the status line does not prove the editor can accept input safely';
+const nativeBusyEnter = 'input --enter is unavailable while the AGY session is busy or blocked';
+const nativeBusySend = 'Antigravity CLI native session is busy';
 const callbackRefused = 'AGY status line callback refused: expected the fixed command in a live native TUI';
 const hookCallbackRefused = 'AGY hook callback refused: expected a hook invoked by a live native TUI';
 const storageUnavailable = 'AGY status line callback refused: private report storage unavailable';
@@ -23,6 +26,7 @@ const conversationId = new RegExp(`^${uuid}$`, 'u');
 const nativeId = new RegExp(`^agy:native-([1-9]\\d{0,9})\\.([0-9a-f]{16})-${uuid}$`, 'u');
 const receiptName = /^pid-([1-9]\d{0,9})\.json$/u;
 const reportLimit = 4096;
+const inlineSendLimit = 4096;
 const transcriptLimit = 32 * 1024 * 1024;
 const observeMs = 850;
 const statuses = new Set(['unknown', 'idle', 'running', 'blocked', 'failed']);
@@ -465,6 +469,22 @@ function ownsReport(report, row) {
   return !!report && !!row && report.tty === row.tty && report.generation === generation(row);
 }
 
+async function stageNativePrompt(text) {
+  const directory = nativeReceiptDirectory();
+  try { await mkdir(directory, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  await privateReceiptDirectory(directory);
+  const promptsDir = join(directory, 'prompts');
+  try { await mkdir(promptsDir, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  await privateReceiptDirectory(promptsDir);
+  const path = join(promptsDir, `msg-${randomUUID()}.md`);
+  const file = await open(path, 'wx', 0o600);
+  try {
+    await file.chmod(0o600);
+    await file.writeFile(text, 'utf8');
+  } finally { await file.close(); }
+  return path;
+}
+
 function sessionRow(row, report) {
   if (report.source === 'hook') {
     return {
@@ -481,15 +501,21 @@ function sessionRow(row, report) {
       historyMode: 'persisted',
       historyReason: undefined,
       wait: true,
-      send: false,
-      sendReason: hintOnly,
+      send: true,
+      sendReason: undefined,
     };
   }
   return { ...processRow(row), id: `agy:native-${row.pid}.${report.generation}-${report.conversation}`, kind: 'session', _agy: 'native',
     _nativeSource: 'statusline', title: safeTitle(report.title), status: report.status, sendReason: hintOnly };
 }
 
-export function createNativeAdapter({ inspectProcesses: inspect = inspectProcesses, inspectStatusSource: verifySource = inspectStatusSource, inspectHookSource: verifyHookSource } = {}) {
+export function createNativeAdapter({
+  inspectProcesses: inspect = inspectProcesses,
+  inspectStatusSource: verifySource = inspectStatusSource,
+  inspectHookSource: verifyHookSource,
+  sendInput = sendTerminalInput,
+  confirmTurnMs = 500,
+} = {}) {
   const canObserveStatus = process.platform === 'darwin' || verifySource !== inspectStatusSource;
   const resolveHookSource = verifyHookSource ?? (() => inspectHookSourceWith(inspect));
 
@@ -634,11 +660,47 @@ export function createNativeAdapter({ inspectProcesses: inspect = inspectProcess
         await delay(Math.min(150, Math.max(0, deadline - performance.now())));
       }
     },
-    async confirmNativeTui(session) {
-      // 真机在 /resume 选择器内仍报告 idle；状态行不授权投递文本、提交或任何具名键。
-      throw new Error(session?._agy === 'process' ? nativeIdentityUnavailable : nativeInputUnavailable);
+    async confirmNativeTui(session, action) {
+      if (session?._agy === 'process') throw new Error(nativeIdentityUnavailable);
+      if (session?._agy !== 'native' || session._nativeSource !== 'hook') {
+        // 状态行不能证明编辑器可安全输入，继续拒绝。
+        throw new Error(nativeInputUnavailable);
+      }
+      const live = await lookupNative(session.id);
+      if (!live || live._nativeSource !== 'hook') throw new Error(nativeIdentityUnavailable);
+      if (action?.enter && ['running', 'blocked'].includes(live.status)) throw new Error(nativeBusyEnter);
+      return live;
+    },
+    async sendNative(session, text, { lang = 'en' } = {}) {
+      if (typeof text !== 'string' || !text.trim()) throw new Error('Message must not be empty');
+      if (session?._agy === 'process') throw new Error(nativeIdentityUnavailable);
+      if (session?._agy !== 'native' || session._nativeSource !== 'hook') throw new Error(hintOnly);
+      const live = await lookupNative(session.id);
+      if (!live || live._nativeSource !== 'hook') throw new Error(nativeIdentityUnavailable);
+      if (['running', 'blocked'].includes(live.status)) throw new Error(nativeBusySend);
+      const beforeTurnSeq = live._turnSeq ?? 0;
+      const inline = Buffer.byteLength(text, 'utf8') <= inlineSendLimit && !/[\x00-\x1f\x7f-\x9f\u2028\u2029]/u.test(text);
+      const delivered = inline ? text : `Read and follow the complete instructions in ${await stageNativePrompt(text)}`;
+      await sendInput({
+        pid: live.pid,
+        mode: 'text',
+        text: delivered,
+        enter: true,
+        confirm: async () => {
+          const current = await lookupNative(session.id);
+          if (!current || current._nativeSource !== 'hook') throw new Error(nativeIdentityUnavailable);
+          if (['running', 'blocked'].includes(current.status)) throw new Error(nativeBusySend);
+        },
+        lang,
+      });
+      const deadline = performance.now() + confirmTurnMs;
+      while (performance.now() < deadline) {
+        const current = await lookupNative(session.id);
+        if (!current || current.status === 'running' || (current._turnSeq ?? 0) > beforeTurnSeq) break;
+        await delay(Math.min(50, Math.max(0, deadline - performance.now())));
+      }
     },
   };
 }
 
-export const { listNative, lookupNative, recordNativeStatus, recordNativeHook, historyNative, waitNative, confirmNativeTui } = createNativeAdapter();
+export const { listNative, lookupNative, recordNativeStatus, recordNativeHook, historyNative, waitNative, confirmNativeTui, sendNative } = createNativeAdapter();

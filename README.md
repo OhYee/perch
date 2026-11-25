@@ -131,11 +131,11 @@ perch history "$id" --limit 10
 
 `send` uses the provider's message transport; it does not infer intent from text or convert slash-leading messages into terminal commands. For managed OMP sessions, slash-leading prompts (including `/skill:...` after the first turn) are forwarded unchanged. Whether they execute depends on OMP RPC support and may differ from the TUI. A changed session identity invalidates the old handle; use `list` for the current ID. `send` submits without waiting for a reply or approving permission requests. Use `input` for native terminal text or keys.
 
-### 向原生 OMP 终端输入文本或按键
+### 向原生 OMP 或 AGY 终端输入文本或按键
 
 使用前请确认普通编辑器已就绪、输入为空且没有弹窗。`/vibe` 是切换命令，再发送一次会切换回来。
-输入文本和按键仅支持 Tern 或 tmux 中加载完整扩展的原生 OMP 会话，须使用 `list` 返回的完整会话 ID 并通过精确的实时会话身份握手；不支持托管会话或只读查看器。前台进程没有精确匹配时不会输入。
-`input ID TEXT` 向编辑器原样输入非空单行文本，不含控制字符（UTF-8 最多 64 KiB），可加 `--enter` 按回车；OMP 报告 `running` 或 `blocked` 时会拒绝此组合。`input ID --key KEY` 按一个具名按键，不区分大小写：`Enter`、`Escape`、`Tab`、`Backspace`、`Up`、`Down`、`Left`、`Right`、`Ctrl+Q`、`Ctrl+Enter`。`--key` 不能与文本或 `--enter` 同时使用。`input` 不支持 `--stdin`；普通消息投递及其 `--stdin` 保持不变。需要时使用 `--` 结束选项。
+输入文本和按键支持 Tern、Herdr 或 tmux 中加载完整扩展的原生 OMP 会话，以及安装 Perch hook 插件（`perch integration install agy`）的原生 agy 会话，须使用 `list` 返回的完整会话 ID 并通过精确的实时会话身份核验；不支持托管会话或只读查看器。前台进程没有精确匹配时不会输入。
+`input ID TEXT` 向编辑器原样输入非空单行文本，不含控制字符（UTF-8 最多 64 KiB），可加 `--enter` 按回车；会话报告 `running` 或 `blocked` 时会拒绝此组合。`input ID --key KEY` 按一个具名按键，不区分大小写：`Enter`、`Escape`、`Tab`、`Backspace`、`Up`、`Down`、`Left`、`Right`、`Ctrl+Q`、`Ctrl+Enter`。`--key` 不能与文本或 `--enter` 同时使用。`input` 不支持 `--stdin`；普通消息投递及其 `--stdin` 保持不变。需要时使用 `--` 结束选项。
 
 ```sh
 # 输入并提交普通聊天
@@ -243,7 +243,7 @@ perch history "$id" --all --json | jq -r '.[] | select(.role == "assistant") | .
 | OMP | 持有会话锁且能绑定同一份日志时可读聊天分支；未写盘的终端可能只有进程线索。加载本地扩展后可向原终端发送消息 | `perch start omp`，通过原生 RPC 启动新会话 |
 | Codex CLI | 共享 app-server 上已加载的 CLI 线程可以对话；不能绑定线程的终端仅作进程线索，不从归档恢复 | `perch start codex`，不要求先开一个 TUI |
 | Claude Code | 从 `claude agents --json` 发现活会话，唯一匹配本地记录时可读历史；普通 TUI 无程序化输入口 | `perch start claude --executable /绝对路径/claude`，使用下述可信原生文件。新增托管路径尚未实机验证 |
-| Antigravity CLI（`agy`） | 发现原生终端进程；启用状态行且查询期间能验证当时的对话时，显示原生会话身份。原生会话不能读取历史或控制 | `perch start agy`，为每个会话启动独立的 `agy acp` |
+| Antigravity CLI（`agy`） | 发现原生终端进程；安装 hook 插件（`perch integration install agy`）后可跨闲置持续识别对话，支持 `history`、`wait`、`input` 和经由 Tern/Herdr/tmux 窗格的 `send`；仅启用状态行时只报告身份 | `perch start agy`，为每个会话启动独立的 `agy acp` |
 
 要让以后启动的 OMP 会话自动加载扩展，可由当前用户主动安装：
 
@@ -314,9 +314,17 @@ Perch 创建的托管对话使用 `agy:<UUID>`；请保留 `start` 返回的完�
 `history` 默认最多返回 20 条，`--limit N` 最多返回 N 条；`view` 也只显示窗口内最近 20 条。正在生成的回复可实时显示；如果回复超出保留上限，整条回复会被移除，`wait` 会报告失败。如果有消息被淘汰或省略，`history --all` 会报错，不会把保留窗口当成完整记录。
 
 对于已有原生终端，`perch list --provider agy` 不扫描归档。默认只显示可识别的活动进程（`agy:pid-…`）。
-macOS 的进程信息不保留参数边界：多词初始提示词或带空格的选项值可能使 Perch 无法确认启动方式，导致既不显示 PID，也无法验证状态行回调。若需要发现原生 TUI，请不带初始提示词启动，并避免使用含空格的选项值。
+macOS 的进程信息不保留参数边界：多词初始提示词或带空格的选项值可能使 Perch 无法确认启动方式，导致既不显示 PID，也无法验证回调。若需要发现原生 TUI，请不带初始提示词启动，并避免使用含空格的选项值。
 
-在 macOS 的 agy 1.5.16 中，可选择启用状态行来识别当前对话。其他版本或平台目前只提供进程线索。
+推荐通过安装 Perch 的 `agy` 生命周期插件接入原生 `agy` TUI：
+
+```sh
+perch integration install agy
+```
+
+该命令会在 `~/.gemini/config/plugins/perch/` 下写入 `plugin.json` 和 `hooks.json`（注册 `SessionStart`、`PreInvocation`、`Stop` 三个 hook），不会覆盖已有外部文件或符号链接；运行中的 `agy` TUI 需重启后生效。启用后，Perch 在 `agy` 闲置期间也能持续识别对话身份，从 `transcript.jsonl` 读取持久化历史（`history`）、通过 `wait` 等待本轮结束，并在 Tern、Herdr 或 tmux 窗格前台校验通过后支持 `input` 和 `send`（短单行消息直接输入并回车；多行或超长消息写入私有临时文件后注入单行引用指令）。
+
+作为只读备选，在 macOS 的 agy 1.5.16 中也可选择启用状态行来识别当前对话：
 若要启用，请在目标 agy 窗口手动输入：
 
 ```text
@@ -328,8 +336,7 @@ macOS 的进程信息不保留参数边界：多词初始提示词或带空格�
 若要继续使用现有渲染器，请不要设置此命令；如需恢复，可在原窗口重新设置原命令，或用 `/statusline reset` 恢复内置状态行。
 Perch 不会代改设置，也不会向原窗口输入命令。
 
-只有查询期间收到新报告且能核实回调进程的父子关系，列表才会显示原生会话身份。agy 在状态变化时发送报告，闲置时不保证有新报告；如果沙箱拦截进程检查，或查询期间没有新报告，仍只显示进程线索。
-原生 agy 不支持 `history`、`view`、`send`、`wait` 或 `close`。状态行不能确认编辑器焦点或排除选择及权限弹窗，因此 `input` 拒绝文本、`--enter` 和具名按键。请在原窗口继续交互。
+仅启用状态行（未安装 hook 插件）时，只有查询期间收到新报告且能核实回调进程的父子关系，列表才会显示原生会话身份；且不支持 `history`、`view`、`send`、`input`、`wait` 或 `close`。
 
 ## 参与项目
 

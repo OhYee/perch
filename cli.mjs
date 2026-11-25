@@ -559,7 +559,7 @@ async function run([command, ...args]) {
   }
   if (command === 'send') {
     deliveryAttempted = true;
-    await api.send(session, text);
+    await api.send(session, text, { lang });
     return values.json ? json({ accepted: true }) : console.log(style(tr('Accepted.', '已接收。'), 32));
   }
   if (command === 'close') {
