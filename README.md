@@ -255,7 +255,7 @@ perch integration install omp
 
 为兼容已有会话，存储路径、环境变量、桥接协议和扩展文件名保持不变。
 
-已运行的 OMP TUI 需要重启后才会加载扩展。加载该扩展后，OMP 除支持本机桥接发现外，还会注册 `perch` 工具（并在 `/vibe` 模式下自动加入可用工具列表），可直接执行 `list`、`start`（支持附带 `prompt` 立即发送）、`send`、`wait`、`history`、`resume` 和 `close`。`start`（带 `prompt`）和 `send` 默认开启 `notify: true`，在后台异步等待完成并将状态与最新回复以 follow-up 消息回推到当前 OMP 会话；会话退出时会自动关闭本会话拉起的托管进程。要检查或撤销安装，将下面的路径替换为安装结果中的 `path`；确认它是本工具安装的文件后，只删除该文件：
+已运行的 OMP TUI 需要重启后才会加载扩展。加载该扩展后，OMP 除支持本机桥接发现外，还会注册 `perch` 工具（并在 `/vibe` 模式下自动加入可用工具列表；由 `perch start omp` 拉起的托管子进程自动隐藏该工具以防递归委派），可直接执行 `list`（支持 `owned: true` 仅看本会话派生的任务）、`start`（支持 `name` 任务标签和 `prompt` 一步发送）、`send`、`wait`、`history`、`resume` 和 `close`。`start`（带 `prompt`）和 `send` 默认开启 `notify: true` 与定时心跳（默认每 180 秒，可用 `heartbeatSeconds` 调整或设为 `0` 关闭），在后台异步等待完成后以 follow-up 消息回推状态与最新回复；同时每轮请求前自动向主控注入在途与未处理任务的轻量账本，防止长对话或上下文压缩丢单；会话退出时自动关闭本会话拉起的托管进程。要检查或撤销安装，将下面的路径替换为安装结果中的 `path`；确认它是本工具安装的文件后，只删除该文件：
 
 ```sh
 ls -l "<安装结果中的 path>"

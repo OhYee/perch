@@ -13,11 +13,15 @@ const PROVIDERS = new Set(['omp', 'codex', 'claude', 'agy']);
 const PANES = new Set(['right', 'tern', 'tmux', 'herdr']);
 const MAX_CLI_STDOUT = 16 * 1024 * 1024;
 const MAX_NOTIFICATION_CHARS = 4000;
+const MAX_HEARTBEAT_PREVIEW_CHARS = 600;
+const DEFAULT_HEARTBEAT_SECONDS = 180;
 
 type PerchToolParams = {
   op: string;
   provider?: string;
   id?: string;
+  name?: string;
+  owned?: boolean;
   cwd?: string;
   model?: string;
   executable?: string;
@@ -27,6 +31,7 @@ type PerchToolParams = {
   prompt?: string;
   text?: string;
   notify?: boolean;
+  heartbeatSeconds?: number;
   timeout?: number;
   limit?: number;
   all?: boolean;
@@ -39,14 +44,27 @@ type CliRunResult = {
   stderr: string;
 };
 
-type SessionMeta = {
+type TaskState = 'idle' | 'running' | 'completed' | 'failed' | 'needs_input' | 'interrupted';
+
+type TrackedTask = {
+  id: string;
+  name?: string;
   provider?: string;
   model?: string;
+  cwd?: string;
+  state: TaskState;
+  unhandled: boolean;
+  finishSeq: number;
+  startedAt?: number;
+  finishedAt?: number;
+  error?: string;
+  heartbeatCount: number;
 };
 
 type WatcherEntry = {
   controller: AbortController;
   generation: number;
+  timer?: ReturnType<typeof setInterval>;
 };
 
 function resolvePerchInvocation(): [string, string[]] {
@@ -140,22 +158,59 @@ function cliErrorMessage(result: CliRunResult, fallback: string): string {
   return detail || fallback;
 }
 
+function sanitizeName(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const cleaned = value.replace(/[\x00-\x1f\x7f-\x9f]/gu, '').trim();
+  if (!cleaned) return undefined;
+  return cleaned.slice(0, 64);
+}
+
+function resolveHeartbeatMs(heartbeatSeconds: number | undefined): number {
+  if (heartbeatSeconds !== undefined) {
+    if (!Number.isSafeInteger(heartbeatSeconds) || heartbeatSeconds < 0 || heartbeatSeconds > 86400) {
+      throw new Error('heartbeatSeconds must be an integer between 0 and 86400');
+    }
+    return heartbeatSeconds * 1000;
+  }
+  const envValue = process.env.PERCH_HEARTBEAT_MS?.trim();
+  if (envValue !== undefined && envValue !== '') {
+    const parsed = Number(envValue);
+    if (Number.isSafeInteger(parsed) && parsed >= 0) return parsed;
+  }
+  return DEFAULT_HEARTBEAT_SECONDS * 1000;
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h${minutes}m`;
+  if (minutes > 0) return `${minutes}m${seconds}s`;
+  return `${seconds}s`;
+}
+
 function clipText(text: string, limit: number): { text: string; truncated: boolean } {
   if (text.length <= limit) return { text, truncated: false };
   return { text: `${text.slice(0, limit)}\n...[truncated; call perch op=history to inspect full output]`, truncated: true };
 }
 
+function taskLabel(id: string, task: TrackedTask | undefined): string {
+  const meta = [task?.provider, task?.model].filter(Boolean).join(' / ');
+  const base = task?.name ? `${task.name} (${id})` : id;
+  return meta ? `${base} [${meta}]` : base;
+}
+
 function formatNotification(
   id: string,
   status: string,
-  meta: SessionMeta | undefined,
+  task: TrackedTask | undefined,
   errorText: string | undefined,
   replyText: string | undefined,
 ): string {
-  const tags = [meta?.provider, meta?.model].filter(Boolean).join(' / ');
   const lines = [
     '[Perch async update]',
-    `Session: ${id}${tags ? ` (${tags})` : ''}`,
+    `Session: ${taskLabel(id, task)}`,
     `Status: ${status}${errorText ? ` — ${errorText}` : ''}`,
   ];
   if (replyText) {
@@ -163,6 +218,43 @@ function formatNotification(
     lines.push('Latest assistant reply:', clipped.text);
   }
   return lines.join('\n');
+}
+
+function formatHeartbeat(
+  id: string,
+  task: TrackedTask | undefined,
+  elapsedMs: number,
+  heartbeatCount: number,
+  replyPreview: string | undefined,
+): string {
+  const lines = [
+    '[Perch heartbeat]',
+    `Session: ${taskLabel(id, task)}`,
+    `Status: still running (elapsed ${formatDuration(elapsedMs)}, check #${heartbeatCount})`,
+    'Action: inspect with perch op=history or op=wait(timeout=0), or close with op=close if stuck.',
+  ];
+  if (replyPreview) {
+    lines.push('Latest visible assistant output:', clipText(replyPreview, MAX_HEARTBEAT_PREVIEW_CHARS).text);
+  }
+  return lines.join('\n');
+}
+
+function formatLedger(activeTasks: TrackedTask[], now: number): string {
+  const rows = activeTasks.map(task => {
+    const label = taskLabel(task.id, task);
+    if (task.state === 'running') {
+      const elapsed = task.startedAt !== undefined ? ` (elapsed ${formatDuration(now - task.startedAt)})` : '';
+      return `- ${label}: running${elapsed}`;
+    }
+    const err = task.error ? ` — ${task.error}` : '';
+    const flag = task.unhandled ? ' [UNHANDLED — inspect/report via perch history|send|close]' : '';
+    return `- ${label}: ${task.state}${err}${flag}`;
+  });
+  return [
+    '[Perch active task ledger]',
+    ...rows,
+    'Track every running or UNHANDLED task above; do not drop dispatched work.',
+  ].join('\n');
 }
 
 // Loaded explicitly or through the user's opt-in OMP integration.
@@ -178,9 +270,11 @@ export default function (pi: ExtensionAPI) {
   let stopping = false;
   let sessionEpoch = 0;
   let watcherGeneration = 0;
+  let finishCounter = 0;
+  let pendingLedgerAck: Map<string, number> | undefined;
   const admissions = new Set<Promise<void>>();
   const ownedSessions = new Set<string>();
-  const sessionMeta = new Map<string, SessionMeta>();
+  const tasks = new Map<string, TrackedTask>();
   const watchers = new Map<string, WatcherEntry>();
 
   function sessionStatus(ctx: ExtensionContext): 'running' | 'idle' | 'unknown' {
@@ -191,41 +285,47 @@ export default function (pi: ExtensionAPI) {
     return idle === true && queued === false ? 'idle' : 'unknown';
   }
 
+  function ensureTask(id: string, patch?: Partial<TrackedTask>): TrackedTask {
+    let task = tasks.get(id);
+    if (!task) {
+      task = {
+        id,
+        provider: id.includes(':') ? id.split(':', 1)[0] : undefined,
+        state: 'idle',
+        unhandled: false,
+        finishSeq: 0,
+        heartbeatCount: 0,
+      };
+      tasks.set(id, task);
+    }
+    if (patch) Object.assign(task, patch);
+    return task;
+  }
+
   function cancelWatcher(id: string) {
     const existing = watchers.get(id);
     if (!existing) return;
     watchers.delete(id);
+    if (existing.timer) clearInterval(existing.timer);
     existing.controller.abort();
   }
 
   function cancelAllWatchers() {
     for (const [id, entry] of watchers) {
       watchers.delete(id);
+      if (entry.timer) clearInterval(entry.timer);
       entry.controller.abort();
     }
   }
 
-  function deliverAsyncNotification(
-    id: string,
-    status: string,
-    meta: SessionMeta | undefined,
-    errorText: string | undefined,
-    replyText: string | undefined,
-  ) {
-    const content = formatNotification(id, status, meta, errorText, replyText);
+  function pushAgentEvent(customType: string, content: string, details: Record<string, unknown>) {
     const anyPi = pi as unknown as {
       sendMessage?: (message: Record<string, unknown>, options?: Record<string, unknown>) => void;
       sendUserMessage?: (content: string, options?: Record<string, unknown>) => Promise<void>;
     };
     if (typeof anyPi.sendMessage === 'function') {
       anyPi.sendMessage(
-        {
-          customType: 'perch-worker-event',
-          content,
-          display: true,
-          attribution: 'agent',
-          details: { id, status, ...(meta ?? {}), ...(errorText ? { error: errorText } : {}) },
-        },
+        { customType, content, display: true, attribution: 'agent', details },
         { triggerTurn: true, deliverAs: 'followUp' },
       );
       return;
@@ -235,50 +335,122 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function startWatcher(id: string) {
+  async function readLatestAssistantReply(id: string, signal: AbortSignal, timeoutMs: number): Promise<string | undefined> {
+    try {
+      const historyResult = await runPerchCli(['history', id, '--limit', '4', '--json'], { signal, timeoutMs });
+      if (historyResult.code !== 0) return undefined;
+      const messages = parseJson(historyResult.stdout);
+      if (!Array.isArray(messages)) return undefined;
+      const lastAssistant = [...messages].reverse().find(
+        entry => entry && typeof entry === 'object' && (entry as { role?: string }).role === 'assistant' && typeof (entry as { text?: string }).text === 'string',
+      ) as { text: string } | undefined;
+      return lastAssistant?.text.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function deliverAsyncNotification(
+    id: string,
+    status: string,
+    task: TrackedTask | undefined,
+    errorText: string | undefined,
+    replyText: string | undefined,
+  ) {
+    const content = formatNotification(id, status, task, errorText, replyText);
+    pushAgentEvent('perch-worker-event', content, {
+      id,
+      status,
+      ...(task?.name ? { name: task.name } : {}),
+      ...(task?.provider ? { provider: task.provider } : {}),
+      ...(task?.model ? { model: task.model } : {}),
+      ...(errorText ? { error: errorText } : {}),
+    });
+  }
+
+  function startWatcher(id: string, heartbeatMs: number) {
     cancelWatcher(id);
     const controller = new AbortController();
     const generation = ++watcherGeneration;
     const epoch = sessionEpoch;
-    watchers.set(id, { controller, generation });
+    const entry: WatcherEntry = { controller, generation };
+    if (heartbeatMs > 0) {
+      let ticking = false;
+      entry.timer = setInterval(() => {
+        if (ticking || stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
+        const currentEntry = watchers.get(id);
+        if (!currentEntry || currentEntry.generation !== generation) return;
+        const task = tasks.get(id);
+        if (!task || task.state !== 'running') return;
+        ticking = true;
+        void (async () => {
+          try {
+            const preview = await readLatestAssistantReply(id, controller.signal, 3000);
+            if (stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
+            if (watchers.get(id)?.generation !== generation || task.state !== 'running') return;
+            task.heartbeatCount += 1;
+            const elapsedMs = task.startedAt !== undefined ? Date.now() - task.startedAt : heartbeatMs * task.heartbeatCount;
+            const content = formatHeartbeat(id, task, elapsedMs, task.heartbeatCount, preview);
+            pushAgentEvent('perch-worker-heartbeat', content, {
+              id,
+              status: 'running',
+              heartbeatCount: task.heartbeatCount,
+              elapsedSeconds: Math.floor(elapsedMs / 1000),
+              ...(task.name ? { name: task.name } : {}),
+              ...(task.provider ? { provider: task.provider } : {}),
+              ...(task.model ? { model: task.model } : {}),
+            });
+          } finally {
+            ticking = false;
+          }
+        })();
+      }, heartbeatMs);
+      entry.timer.unref?.();
+    }
+    watchers.set(id, entry);
     void (async () => {
       try {
         const result = await runPerchCli(['wait', id, '--json'], { signal: controller.signal });
         if (stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
         let parsed: { status?: string; error?: string } | undefined;
         try { parsed = parseJson(result.stdout) as { status?: string; error?: string } | undefined; } catch {}
-        const status = typeof parsed?.status === 'string'
-          ? parsed.status
+        const status: TaskState = parsed?.status && ['completed', 'failed', 'needs_input', 'interrupted'].includes(parsed.status)
+          ? parsed.status as TaskState
           : result.code === 0 ? 'completed' : result.code === 3 ? 'needs_input' : 'failed';
         const errorText = typeof parsed?.error === 'string'
           ? parsed.error
           : status === 'failed' ? cliErrorMessage(result, 'Perch wait failed') : undefined;
-        let replyText: string | undefined;
-        if (['completed', 'failed', 'needs_input'].includes(status)) {
-          try {
-            const historyResult = await runPerchCli(['history', id, '--limit', '4', '--json'], {
-              signal: controller.signal,
-              timeoutMs: 5000,
-            });
-            if (historyResult.code === 0) {
-              const messages = parseJson(historyResult.stdout);
-              if (Array.isArray(messages)) {
-                const lastAssistant = [...messages].reverse().find(
-                  entry => entry && typeof entry === 'object' && (entry as { role?: string }).role === 'assistant' && typeof (entry as { text?: string }).text === 'string',
-                ) as { text: string } | undefined;
-                if (lastAssistant?.text.trim()) replyText = lastAssistant.text.trim();
-              }
-            }
-          } catch {}
+        const replyText = ['completed', 'failed', 'needs_input'].includes(status)
+          ? await readLatestAssistantReply(id, controller.signal, 5000)
+          : undefined;
+        if (stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
+        if (watchers.get(id)?.generation === generation) {
+          if (entry.timer) clearInterval(entry.timer);
+          watchers.delete(id);
+        }
+        const task = ensureTask(id, {
+          state: status,
+          unhandled: true,
+          finishSeq: ++finishCounter,
+          finishedAt: Date.now(),
+          error: errorText,
+        });
+        deliverAsyncNotification(id, status, task, errorText, replyText);
+      } catch (error) {
+        if (watchers.get(id)?.generation === generation) {
+          if (entry.timer) clearInterval(entry.timer);
+          watchers.delete(id);
         }
         if (stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
-        if (watchers.get(id)?.generation === generation) watchers.delete(id);
-        deliverAsyncNotification(id, status, sessionMeta.get(id), errorText, replyText);
-      } catch (error) {
-        if (watchers.get(id)?.generation === generation) watchers.delete(id);
-        if (stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
         const message = error instanceof Error ? error.message : String(error);
-        deliverAsyncNotification(id, 'failed', sessionMeta.get(id), message, undefined);
+        const task = ensureTask(id, {
+          state: 'failed',
+          unhandled: true,
+          finishSeq: ++finishCounter,
+          finishedAt: Date.now(),
+          error: message,
+        });
+        deliverAsyncNotification(id, 'failed', task, message, undefined);
       }
     })();
   }
@@ -309,6 +481,7 @@ export default function (pi: ExtensionAPI) {
   function pause() { current = undefined; identity = ''; }
   async function pauseAndDrain() {
     sessionEpoch++;
+    pendingLedgerAck = undefined;
     cancelAllWatchers();
     pause();
     await Promise.allSettled(admissions);
@@ -334,11 +507,13 @@ export default function (pi: ExtensionAPI) {
       approval: 'exec',
       loadMode: 'essential',
       strict: true,
-      description: 'Manage local agent sessions (agy, omp, codex, claude) through Perch. Managed sessions run in full-access / yolo mode. Supports op=list, start (optionally with prompt to send immediately), send (async notification enabled by default via notify=true), wait, history, resume, and close. When notify=true (default), Perch watches the turn in the background and asynchronously posts a follow-up update with status and latest reply once done.',
+      description: 'Manage local agent sessions (agy, omp, codex, claude) through Perch. Managed sessions run in full-access / yolo mode. Supports op=list (with owned=true to list only this director’s tracked tasks), start (optional name label and prompt to send immediately), send (async notification enabled by default via notify=true, plus periodic heartbeatSeconds default 180s to prevent silent hangs), wait, history, resume, and close. Active running and unhandled finished tasks are automatically injected into context so dispatched work is never lost.',
       parameters: type({
         op: "'list' | 'start' | 'send' | 'wait' | 'history' | 'resume' | 'close'",
         'provider?': "'omp' | 'codex' | 'claude' | 'agy'",
         'id?': 'string > 0',
+        'name?': 'string > 0',
+        'owned?': 'boolean',
         'cwd?': 'string > 0',
         'model?': 'string > 0',
         'executable?': 'string > 0',
@@ -348,6 +523,7 @@ export default function (pi: ExtensionAPI) {
         'prompt?': 'string > 0',
         'text?': 'string > 0',
         'notify?': 'boolean',
+        'heartbeatSeconds?': 'number',
         'timeout?': 'number',
         'limit?': 'number',
         'all?': 'boolean',
@@ -365,13 +541,56 @@ export default function (pi: ExtensionAPI) {
           }
           const result = await runPerchCli(args, { signal, timeoutMs: 15000 });
           if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch list failed'));
-          return emit(parseJson(result.stdout) ?? []);
+          const liveRows = (parseJson(result.stdout) ?? []) as Array<Record<string, unknown>>;
+          const liveById = new Map(liveRows.filter(r => typeof r?.id === 'string').map(r => [r.id as string, r]));
+          const now = Date.now();
+          if (params.owned) {
+            const ownedIds = new Set([...ownedSessions, ...tasks.keys()]);
+            const rows = [];
+            for (const id of ownedIds) {
+              const task = tasks.get(id);
+              const live = liveById.get(id);
+              const provider = task?.provider ?? (typeof live?.provider === 'string' ? live.provider : id.split(':', 1)[0]);
+              if (params.provider && provider !== params.provider) continue;
+              const elapsedSeconds = task?.startedAt !== undefined
+                ? Math.max(0, Math.floor(((task.state === 'running' ? now : (task.finishedAt ?? now)) - task.startedAt) / 1000))
+                : undefined;
+              rows.push({
+                id,
+                ...(task?.name ? { name: task.name } : {}),
+                provider,
+                ...(task?.model ? { model: task.model } : {}),
+                state: task?.state ?? (typeof live?.status === 'string' ? live.status : 'unknown'),
+                unhandled: task?.unhandled ?? false,
+                liveStatus: typeof live?.status === 'string' ? live.status : 'stopped',
+                ...(elapsedSeconds !== undefined ? { elapsedSeconds } : {}),
+                ...(task?.error ? { error: task.error } : {}),
+                cwd: task?.cwd ?? (typeof live?.cwd === 'string' ? live.cwd : null),
+              });
+            }
+            return emit(rows);
+          }
+          const enriched = liveRows.map(row => {
+            const id = typeof row?.id === 'string' ? row.id : '';
+            const task = id ? tasks.get(id) : undefined;
+            if (!id || (!ownedSessions.has(id) && !task)) return row;
+            return {
+              ...row,
+              owned: true,
+              ...(task?.name ? { name: task.name } : {}),
+              ...(task?.unhandled ? { unhandled: true } : {}),
+            };
+          });
+          return emit(enriched);
         }
         if (params.op === 'start') {
           if (!params.provider || !PROVIDERS.has(params.provider)) {
             throw new Error('perch start requires provider (agy, omp, codex, or claude)');
           }
-          const args = ['start', params.provider, '--cwd', params.cwd || ctx.cwd, '--json'];
+          const heartbeatMs = resolveHeartbeatMs(params.heartbeatSeconds);
+          const taskName = sanitizeName(params.name);
+          const cwd = params.cwd || ctx.cwd;
+          const args = ['start', params.provider, '--cwd', cwd, '--json'];
           if (params.model) args.push('--model', params.model);
           if (params.executable) args.push('--executable', params.executable);
           if (params.pane) {
@@ -385,7 +604,16 @@ export default function (pi: ExtensionAPI) {
           const started = parseJson(startedResult.stdout) as { id?: string; provider?: string; pane?: unknown };
           if (!started?.id) throw new Error('perch start did not return a session ID');
           ownedSessions.add(started.id);
-          sessionMeta.set(started.id, { provider: params.provider, ...(params.model ? { model: params.model } : {}) });
+          ensureTask(started.id, {
+            ...(taskName ? { name: taskName } : {}),
+            provider: params.provider,
+            ...(params.model ? { model: params.model } : {}),
+            cwd,
+            state: 'idle',
+            unhandled: false,
+            error: undefined,
+            heartbeatCount: 0,
+          });
           if (params.prompt !== undefined) {
             if (!params.prompt.trim()) throw new Error('prompt must not be empty');
             const sentResult = await runPerchCli(['send', started.id, '--stdin', '--json'], {
@@ -396,24 +624,43 @@ export default function (pi: ExtensionAPI) {
             if (sentResult.code !== 0) {
               throw new Error(`Session ${started.id} started, but initial send failed: ${cliErrorMessage(sentResult, 'perch send failed')}`);
             }
+            ensureTask(started.id, {
+              state: 'running',
+              unhandled: false,
+              startedAt: Date.now(),
+              finishedAt: undefined,
+              error: undefined,
+              heartbeatCount: 0,
+            });
             const shouldNotify = params.notify !== false;
-            if (shouldNotify) startWatcher(started.id);
-            return emit({ ...started, accepted: true, notify: shouldNotify });
+            if (shouldNotify) startWatcher(started.id, heartbeatMs);
+            return emit({ ...started, ...(taskName ? { name: taskName } : {}), accepted: true, notify: shouldNotify });
           }
-          return emit(started);
+          return emit({ ...started, ...(taskName ? { name: taskName } : {}) });
         }
         if (!params.id) throw new Error(`perch ${params.op} requires id`);
         if (params.op === 'send') {
           const message = params.text ?? params.prompt;
           if (!message || !message.trim()) throw new Error('perch send requires non-empty text');
+          const heartbeatMs = resolveHeartbeatMs(params.heartbeatSeconds);
           const result = await runPerchCli(['send', params.id, '--stdin', '--json'], {
             input: message,
             signal,
             timeoutMs: 120000,
           });
           if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch send failed'));
+          const taskName = sanitizeName(params.name);
+          ensureTask(params.id, {
+            ...(taskName ? { name: taskName } : {}),
+            state: 'running',
+            unhandled: false,
+            startedAt: Date.now(),
+            finishedAt: undefined,
+            error: undefined,
+            heartbeatCount: 0,
+          });
           const shouldNotify = params.notify !== false;
-          if (shouldNotify) startWatcher(params.id);
+          if (shouldNotify) startWatcher(params.id, heartbeatMs);
           return emit({ id: params.id, accepted: true, notify: shouldNotify });
         }
         if (params.op === 'wait') {
@@ -425,9 +672,17 @@ export default function (pi: ExtensionAPI) {
             args.push('--timeout', String(params.timeout));
           }
           const result = await runPerchCli(args, { signal });
-          let parsed: unknown;
-          try { parsed = parseJson(result.stdout); } catch {}
-          if (parsed && typeof parsed === 'object') return emit(parsed);
+          let parsed: { status?: string; error?: string } | undefined;
+          try { parsed = parseJson(result.stdout) as { status?: string; error?: string } | undefined; } catch {}
+          if (parsed && typeof parsed === 'object') {
+            const task = tasks.get(params.id);
+            if (task && typeof parsed.status === 'string' && ['completed', 'failed', 'needs_input', 'interrupted'].includes(parsed.status)) {
+              task.state = parsed.status as TaskState;
+              task.finishedAt = Date.now();
+              if (typeof parsed.error === 'string') task.error = parsed.error;
+            }
+            return emit(parsed);
+          }
           throw new Error(cliErrorMessage(result, 'perch wait failed'));
         }
         if (params.op === 'history') {
@@ -439,19 +694,24 @@ export default function (pi: ExtensionAPI) {
           }
           const result = await runPerchCli(args, { signal, timeoutMs: 15000 });
           if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch history failed'));
+          const task = tasks.get(params.id);
+          if (task && task.state !== 'running') task.unhandled = false;
           return emit(parseJson(result.stdout) ?? []);
         }
         if (params.op === 'resume') {
           const result = await runPerchCli(['resume', params.id, '--json'], { signal, timeoutMs: 45000 });
           if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch resume failed'));
-          const resumed = parseJson(result.stdout) as { id?: string };
-          if (resumed?.id) ownedSessions.add(resumed.id);
+          const resumed = parseJson(result.stdout) as { id?: string; provider?: string };
+          if (resumed?.id) {
+            ownedSessions.add(resumed.id);
+            ensureTask(resumed.id, { provider: resumed.provider ?? resumed.id.split(':', 1)[0], state: 'idle' });
+          }
           return emit(resumed);
         }
         if (params.op === 'close') {
           cancelWatcher(params.id);
           ownedSessions.delete(params.id);
-          sessionMeta.delete(params.id);
+          tasks.delete(params.id);
           const result = await runPerchCli(['close', params.id, '--json'], { signal, timeoutMs: 15000 });
           if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch close failed'));
           return emit(parseJson(result.stdout) ?? { id: params.id, closed: true });
@@ -460,6 +720,50 @@ export default function (pi: ExtensionAPI) {
       },
     });
   }
+
+  pi.on('context', (event, ctx) => {
+    if (isManagedWorker) return;
+    const anyCtx = ctx as unknown as { agent?: { kind?: string } };
+    if (anyCtx.agent?.kind === 'sub') return;
+    const active = [...tasks.values()].filter(task => task.state === 'running' || task.unhandled);
+    if (!active.length) {
+      pendingLedgerAck = undefined;
+      return;
+    }
+    const unhandled = active.filter(task => task.unhandled);
+    pendingLedgerAck = unhandled.length ? new Map(unhandled.map(task => [task.id, task.finishSeq])) : undefined;
+    const existing = Array.isArray((event as { messages?: unknown[] })?.messages) ? (event as { messages: unknown[] }).messages : [];
+    return {
+      messages: [
+        ...existing,
+        {
+          role: 'custom' as const,
+          customType: 'perch-task-ledger',
+          display: false,
+          attribution: 'agent' as const,
+          content: formatLedger(active, Date.now()),
+          timestamp: Date.now(),
+        },
+      ],
+    };
+  });
+
+  pi.on('message_end', (event, ctx) => {
+    if (isManagedWorker || !pendingLedgerAck) return;
+    const anyCtx = ctx as unknown as { agent?: { kind?: string } };
+    if (anyCtx.agent?.kind === 'sub') return;
+    const msg = (event as { message?: { role?: string; stopReason?: string } })?.message;
+    if (msg?.role !== 'assistant') return;
+    const delivered = pendingLedgerAck;
+    pendingLedgerAck = undefined;
+    if (msg.stopReason !== 'stop') return;
+    for (const [id, seq] of delivered) {
+      const task = tasks.get(id);
+      if (task && task.finishSeq === seq && task.state !== 'running') {
+        task.unhandled = false;
+      }
+    }
+  });
 
   pi.on('mode_changed', async (event, ctx) => {
     const state = (event as { state?: { vibe?: { status?: string } } })?.state;
@@ -570,7 +874,7 @@ export default function (pi: ExtensionAPI) {
     await pauseAndDrain();
     const toClose = [...ownedSessions];
     ownedSessions.clear();
-    sessionMeta.clear();
+    tasks.clear();
     if (toClose.length) {
       await Promise.allSettled(toClose.map(id => runPerchCli(['close', id, '--json'], { timeoutMs: 3000 }).catch(() => {})));
     }
