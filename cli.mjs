@@ -28,7 +28,7 @@ const style = (text, code, stream = process.stdout) =>
   stream.isTTY && !Object.hasOwn(process.env, 'NO_COLOR') && process.env.TERM !== 'dumb' && !process.argv.slice(2).includes('--json')
     ? `\x1b[${code}m${text}\x1b[0m` : text;
 function highlightHelp(help) {
-  const token = /(\bperch\s+)(integration(?:\s+(?:install(?:\s+(?:omp|agy))?|agy-hook|agy-statusline))?|list|start|send|input|wait|history|view|close|version|update|help)\b|(?<![\w-])--[\w-]+|(?<![\w-])-[a-zA-Z](?![\w-])|<[^<>\n]+>|\b(?:idle|running|blocked|failed|stopped|unknown)\b/g;
+  const token = /(\bperch\s+)(integration(?:\s+(?:install(?:\s+(?:omp|agy))?|agy-hook|agy-statusline))?|list|start|resume|send|input|wait|history|view|close|version|update|help)\b|(?<![\w-])--[\w-]+|(?<![\w-])-[a-zA-Z](?![\w-])|<[^<>\n]+>|\b(?:idle|running|blocked|failed|stopped|unknown)\b/g;
   return help.split('\n').map(line => {
     if (/^\s*(?:Usage:|用法：|Examples:|示例：)\s*$/.test(line)) return style(line, 1);
     return line.replace(token, (match, prefix, command) => {
