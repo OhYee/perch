@@ -244,9 +244,15 @@ test('AGY separates explicit denial, unknown delivery and matching ACP stop reas
 });
 
 test('AGY send timeout never clears the in-flight admission or retries the prompt', { timeout: 20000 }, async t => {
+  const prevAdmission = process.env.PERCH_AGY_ADMISSION_MS;
+  process.env.PERCH_AGY_ADMISSION_MS = '1500';
+  t.after(() => {
+    if (prevAdmission === undefined) delete process.env.PERCH_AGY_ADMISSION_MS;
+    else process.env.PERCH_AGY_ADMISSION_MS = prevAdmission;
+  });
   const f = await fixture(t);
   const row = await f.start();
-  const uncertain = await f.run(['send', row.id, 'fixture:ack-timeout', '--json']);
+  const uncertain = await f.run(['send', row.id, 'fixture:ack-timeout', '--json'], undefined, { PERCH_AGY_ADMISSION_MS: '1500' });
   assert.equal(uncertain.status, 1, uncertain.stderr);
   assert.deepEqual(json(uncertain), { accepted: null });
   assert.match(uncertain.stderr, /do not (?:resend|retry)/i);
