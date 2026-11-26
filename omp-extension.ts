@@ -83,9 +83,11 @@ type TrackedTask = {
   boardRoot?: string;
   state: TaskState;
   unhandled: boolean;
+  turnSeq: number;
   finishSeq: number;
   startedAt?: number;
   finishedAt?: number;
+  acknowledgedAt?: number;
   error?: string;
   heartbeatCount: number;
 };
@@ -394,7 +396,7 @@ function formatNotification(
 ): string {
   const lines = [
     '[Perch async update]',
-    `Session: ${taskLabel(id, task)}`,
+    `Session: ${taskLabel(id, task)}${task?.turnSeq ? ` (turn #${task.turnSeq})` : ''}`,
     `Status: ${status}${errorText ? ` — ${errorText}` : ''}`,
   ];
   if (task?.boardItem) {
@@ -434,9 +436,10 @@ function formatLedger(activeTasks: TrackedTask[], now: number): string {
   const rows = activeTasks.map(task => {
     const label = taskLabel(task.id, task);
     const boardTag = task.boardItem ? ` [board:${task.boardItem}]` : '';
+    const turnTag = task.turnSeq ? `turn #${task.turnSeq}, ` : '';
     if (task.state === 'running') {
-      const elapsed = task.startedAt !== undefined ? ` (elapsed ${formatDuration(now - task.startedAt)})` : '';
-      return `- ${label}${boardTag}: running${elapsed}`;
+      const elapsed = task.startedAt !== undefined ? `elapsed ${formatDuration(now - task.startedAt)}` : 'starting';
+      return `- ${label}${boardTag}: running (${turnTag}${elapsed})`;
     }
     const err = task.error ? ` — ${task.error}` : '';
     const flag = task.unhandled ? ' [UNHANDLED — inspect/report via perch history|send|close]' : '';
@@ -447,6 +450,43 @@ function formatLedger(activeTasks: TrackedTask[], now: number): string {
     ...rows,
     'Track every running or UNHANDLED task above; do not drop dispatched work.',
   ].join('\n');
+}
+
+function formatWorkspaceView(allTasks: TrackedTask[], resumableRetired: RetiredWorker[], now: number): string {
+  const lines: string[] = ['[Perch workspace view]'];
+  if (allTasks.length) {
+    lines.push('Open workers (live panes/sessions):');
+    for (const task of allTasks) {
+      const label = taskLabel(task.id, task);
+      const paneTag = task.pane ? ` [pane:${task.pane.backend}:${task.pane.id}]` : '';
+      const boardTag = task.boardItem ? ` [board:${task.boardItem}]` : '';
+      const ref = task.name ?? task.id;
+      const openKind = task.pane ? 'open pane' : 'open session';
+      if (task.state === 'running') {
+        const turnTag = task.turnSeq ? `turn #${task.turnSeq}, ` : '';
+        const elapsed = task.startedAt !== undefined ? `elapsed ${formatDuration(now - task.startedAt)}` : 'starting';
+        lines.push(`- ${label}${paneTag}${boardTag}: running (${turnTag}${elapsed})`);
+      } else if (task.unhandled) {
+        const err = task.error ? ` — ${task.error}` : '';
+        lines.push(`- ${label}${paneTag}${boardTag}: ${task.state}${err} [UNHANDLED — inspect/report, then send or close]`);
+      } else if (task.finishedAt === undefined) {
+        lines.push(`- ${label}${paneTag}${boardTag}: ready (${openKind} — send via perch op=send id="${ref}" or close via perch op=close id="${ref}")`);
+      } else {
+        const idleBase = Math.max(task.finishedAt, task.acknowledgedAt ?? 0);
+        const idleFor = formatDuration(now - idleBase);
+        const statusWord = task.state === 'completed' || task.state === 'idle' ? 'finished' : task.state;
+        const err = task.error ? ` — ${task.error}` : '';
+        lines.push(`- ${label}${paneTag}${boardTag}: idle (${statusWord} ${idleFor} ago${err}; ${openKind} — reuse via perch op=send id="${ref}" or close via perch op=close id="${ref}")`);
+      }
+    }
+  }
+  const recentResumable = resumableRetired.slice(-8);
+  if (recentResumable.length) {
+    const names = recentResumable.map(r => `${r.name ?? r.id}${r.role ? ` [${r.role}]` : ''}`).join(', ');
+    lines.push(`Closed resumable workers (auto-resumes on perch op=send id="<name>"): ${names}`);
+  }
+  lines.push('Track running/UNHANDLED work above; close idle open panes/sessions you no longer need (you can always auto-resume them later via perch op=send).');
+  return lines.join('\n');
 }
 
 function discussionText(content: unknown): string {
@@ -508,8 +548,11 @@ export default function (pi: ExtensionAPI) {
   const retiredWorkers = new Map<string, RetiredWorker>();
   const warnedPromptMessages = new Set<string>();
   const watchers = new Map<string, WatcherEntry>();
+  const inFlightSends = new Set<string>();
   const nativeLaunchChains = new Map<string, Promise<void>>();
   const rightPaneStack: Array<{ id: string; sessionId: string }> = [];
+  let idleReaperTimer: ReturnType<typeof setInterval> | undefined;
+  let reapingIdle = false;
 
   const isManagedWorker = process.env.PERCH_MANAGED_WORKER === '1';
 
@@ -630,6 +673,55 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function stopIdleReaper() {
+    if (idleReaperTimer) {
+      clearInterval(idleReaperTimer);
+      idleReaperTimer = undefined;
+    }
+  }
+
+  async function reapIdleWorkers(idleCloseSeconds: number): Promise<void> {
+    if (stopping || !perchModeEnabled || idleCloseSeconds <= 0 || reapingIdle) return;
+    reapingIdle = true;
+    try {
+      const thresholdMs = idleCloseSeconds * 1000;
+      const isEligible = (task: TrackedTask | undefined): boolean => {
+        if (!task || stopping || !perchModeEnabled) return false;
+        if (task.state === 'running' || task.unhandled) return false;
+        if (inFlightSends.has(task.id) || watchers.has(task.id)) return false;
+        if (task.finishedAt === undefined) return false;
+        const idleSince = Math.max(task.finishedAt, task.acknowledgedAt ?? 0);
+        return Date.now() - idleSince >= thresholdMs;
+      };
+      const candidates = [...tasks.values()].filter(isEligible).map(task => task.id);
+      for (const id of candidates) {
+        if (!isEligible(tasks.get(id))) continue;
+        await closeTrackedWorker(id).catch(() => {});
+      }
+    } finally {
+      reapingIdle = false;
+    }
+  }
+
+  function syncIdleReaper(ctx: ExtensionContext, config: PerchModeConfig) {
+    stopIdleReaper();
+    if (stopping || !perchModeEnabled || config.idleCloseSeconds <= 0 || isManagedWorker || isSubAgent(ctx)) return;
+    const intervalMs = Math.max(1000, Math.min(30000, Math.floor((config.idleCloseSeconds * 1000) / 2)));
+    idleReaperTimer = setInterval(() => {
+      if (stopping || !perchModeEnabled) {
+        stopIdleReaper();
+        return;
+      }
+      const latest = loadPerchConfig({ cwd: ctx.cwd });
+      if (latest.idleCloseSeconds <= 0) {
+        stopIdleReaper();
+        return;
+      }
+      void reapIdleWorkers(latest.idleCloseSeconds);
+    }, intervalMs);
+    idleReaperTimer.unref?.();
+  }
+
   async function setPerchMode(ctx: ExtensionContext, enabled: boolean, persist: boolean): Promise<PerchModeConfig> {
     const config = loadPerchConfig({ cwd: ctx.cwd });
     perchModeEnabled = enabled;
@@ -637,6 +729,7 @@ export default function (pi: ExtensionAPI) {
       try { anyPi.appendEntry('perch-mode', { enabled }); } catch {}
     }
     await syncPerchTools(ctx, config);
+    syncIdleReaper(ctx, config);
     updatePerchUi(ctx);
     return config;
   }
@@ -676,55 +769,68 @@ export default function (pi: ExtensionAPI) {
     message: string,
     options: { signal?: AbortSignal; notify: boolean; heartbeatMs: number; name?: string },
   ): Promise<{ accepted: boolean | null; running?: boolean; notify: boolean; warning?: string }> {
-    const result = await runPerchCli(['send', id, '--stdin', '--json'], {
-      input: message,
-      signal: options.signal,
-      timeoutMs: 120000,
-    });
-    if (result.code === 0) {
-      ensureTask(id, {
-        ...(options.name ? { name: options.name } : {}),
-        state: 'running',
-        unhandled: false,
-        startedAt: Date.now(),
-        finishedAt: undefined,
-        error: undefined,
-        heartbeatCount: 0,
-      });
-      if (options.notify) startWatcher(id, options.heartbeatMs);
-      updatePerchUi();
-      return { accepted: true, notify: options.notify };
-    }
-    let parsed: { accepted?: boolean | null } | undefined;
-    try { parsed = parseJson(result.stdout) as { accepted?: boolean | null } | undefined; } catch {}
-    if (parsed?.accepted === null) {
-      const probe = await runPerchCli(['wait', id, '--timeout', '0', '--json'], {
+    inFlightSends.add(id);
+    try {
+      const result = await runPerchCli(['send', id, '--stdin', '--json'], {
+        input: message,
         signal: options.signal,
-        timeoutMs: 5000,
-      }).catch(() => undefined);
-      let probeJson: { status?: string } | undefined;
-      try { probeJson = probe ? parseJson(probe.stdout) as { status?: string } | undefined : undefined; } catch {}
-      if (probeJson?.status === 'timeout') {
+        timeoutMs: 120000,
+      });
+      if (result.code === 0) {
+        const prevTurn = tasks.get(id)?.turnSeq ?? 0;
         ensureTask(id, {
           ...(options.name ? { name: options.name } : {}),
           state: 'running',
           unhandled: false,
+          turnSeq: prevTurn + 1,
           startedAt: Date.now(),
           finishedAt: undefined,
+          acknowledgedAt: undefined,
           error: undefined,
           heartbeatCount: 0,
         });
         if (options.notify) startWatcher(id, options.heartbeatMs);
+        else cancelWatcher(id);
         updatePerchUi();
-        return {
-          accepted: null,
-          running: true,
-          notify: options.notify,
-          warning: 'Delivery confirmation timed out, but the worker is running; async watcher attached. Do not resend.',
-        };
+        return { accepted: true, notify: options.notify };
       }
+      let parsed: { accepted?: boolean | null } | undefined;
+      try { parsed = parseJson(result.stdout) as { accepted?: boolean | null } | undefined; } catch {}
+      if (parsed?.accepted === null) {
+        const probe = await runPerchCli(['wait', id, '--timeout', '0', '--json'], {
+          signal: options.signal,
+          timeoutMs: 5000,
+        }).catch(() => undefined);
+        let probeJson: { status?: string } | undefined;
+        try { probeJson = probe ? parseJson(probe.stdout) as { status?: string } | undefined : undefined; } catch {}
+        if (probeJson?.status === 'timeout') {
+          const prevTurn = tasks.get(id)?.turnSeq ?? 0;
+          ensureTask(id, {
+            ...(options.name ? { name: options.name } : {}),
+            state: 'running',
+            unhandled: false,
+            turnSeq: prevTurn + 1,
+            startedAt: Date.now(),
+            finishedAt: undefined,
+            acknowledgedAt: undefined,
+            error: undefined,
+            heartbeatCount: 0,
+          });
+          if (options.notify) startWatcher(id, options.heartbeatMs);
+          else cancelWatcher(id);
+          updatePerchUi();
+          return {
+            accepted: null,
+            running: true,
+            notify: options.notify,
+            warning: 'Delivery confirmation timed out, but the worker is running; async watcher attached. Do not resend.',
+          };
+        }
+      }
+      throw new Error(cliErrorMessage(result, 'perch send failed'));
+    } finally {
+      inFlightSends.delete(id);
     }
-    throw new Error(cliErrorMessage(result, 'perch send failed'));
   }
 
   async function listProviderSessions(provider: string, signal?: AbortSignal): Promise<Array<Record<string, unknown>>> {
@@ -794,6 +900,7 @@ export default function (pi: ExtensionAPI) {
         provider: id.includes(':') ? id.split(':', 1)[0] : undefined,
         state: 'idle',
         unhandled: false,
+        turnSeq: 0,
         finishSeq: 0,
         heartbeatCount: 0,
       };
@@ -873,6 +980,7 @@ export default function (pi: ExtensionAPI) {
     const controller = new AbortController();
     const generation = ++watcherGeneration;
     const epoch = sessionEpoch;
+    const expectedTurnSeq = tasks.get(id)?.turnSeq ?? 0;
     const entry: WatcherEntry = { controller, generation };
     if (heartbeatMs > 0) {
       let ticking = false;
@@ -881,13 +989,13 @@ export default function (pi: ExtensionAPI) {
         const currentEntry = watchers.get(id);
         if (!currentEntry || currentEntry.generation !== generation) return;
         const task = tasks.get(id);
-        if (!task || task.state !== 'running') return;
+        if (!task || task.state !== 'running' || task.turnSeq !== expectedTurnSeq) return;
         ticking = true;
         void (async () => {
           try {
             const preview = await readLatestAssistantReply(id, controller.signal, 3000);
             if (stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
-            if (watchers.get(id)?.generation !== generation || task.state !== 'running') return;
+            if (watchers.get(id)?.generation !== generation || task.state !== 'running' || task.turnSeq !== expectedTurnSeq) return;
             task.heartbeatCount += 1;
             const elapsedMs = task.startedAt !== undefined ? Date.now() - task.startedAt : heartbeatMs * task.heartbeatCount;
             const content = formatHeartbeat(id, task, elapsedMs, task.heartbeatCount, preview);
@@ -923,16 +1031,18 @@ export default function (pi: ExtensionAPI) {
         const replyText = ['completed', 'failed', 'needs_input'].includes(status)
           ? await readLatestAssistantReply(id, controller.signal, 5000)
           : undefined;
-        if (stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
         if (watchers.get(id)?.generation === generation) {
           if (entry.timer) clearInterval(entry.timer);
           watchers.delete(id);
         }
+        if (stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
+        if ((tasks.get(id)?.turnSeq ?? 0) !== expectedTurnSeq) return;
         const task = ensureTask(id, {
           state: status,
           unhandled: true,
           finishSeq: ++finishCounter,
           finishedAt: Date.now(),
+          acknowledgedAt: undefined,
           error: errorText,
         });
         let receiptRecorded = false;
@@ -950,6 +1060,7 @@ export default function (pi: ExtensionAPI) {
           watchers.delete(id);
         }
         if (stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
+        if ((tasks.get(id)?.turnSeq ?? 0) !== expectedTurnSeq) return;
         const message = error instanceof Error ? error.message : String(error);
         const task = ensureTask(id, {
           state: 'failed',
@@ -1149,7 +1260,9 @@ export default function (pi: ExtensionAPI) {
           boardRoot: reboundItem ? ref.boardRoot : undefined,
           state: agyInlinePrompt !== undefined ? 'running' : 'idle',
           unhandled: false,
-          ...(agyInlinePrompt !== undefined ? { startedAt: Date.now(), finishedAt: undefined } : {}),
+          ...(agyInlinePrompt !== undefined
+            ? { turnSeq: (tasks.get(discoveredId)?.turnSeq ?? 0) + 1, startedAt: Date.now(), finishedAt: undefined, acknowledgedAt: undefined }
+            : { finishedAt: undefined, acknowledgedAt: undefined }),
           error: undefined,
           heartbeatCount: 0,
         });
@@ -1219,6 +1332,8 @@ export default function (pi: ExtensionAPI) {
       boardRoot: reboundItem ? ref.boardRoot : undefined,
       state: 'idle',
       unhandled: false,
+      finishedAt: undefined,
+      acknowledgedAt: undefined,
       error: undefined,
     });
     updatePerchUi(ctx);
@@ -1457,7 +1572,7 @@ export default function (pi: ExtensionAPI) {
       approval: 'write',
       loadMode: 'essential',
       strict: true,
-      description: 'Inspect and update this root session’s shared work and decisions. Use op=snapshot for a concise list or add item or decision to read details; mutations return only a changed-item/decision summary. create accepts an optional parentId of an existing item; omit it or use null for a root. Parent relationships cannot be edited. create/edit use a title of at most 80 Unicode code points and a separate description for full requirements; criteria are acceptance criteria. create/edit/assign/progress/submit/approve/reject/release/cancel manage items; use progress with handoff=true for durable confirmed or ruled-out findings, blockers and next steps. decide/note_decision/replace manage decisions. Main may list real session todos with op=todos and explicitly promote one with op=promote, task, optional phase, and criteria.',
+      description: 'Inspect and update this root session’s shared work items and decisions.\nCommon ops & exact params:\n- snapshot: list items/decisions (optional item or decision ID for details)\n- create: title (<=80 chars), description, criteria (optional parentId)\n- edit: item, optional title/description/criteria/priority\n- assign: item, worker, role ("execute" | "review")\n- progress: item, text (set handoff=true for durable findings/blockers/next steps)\n- submit / approve / release / cancel: item, text\n- reject: item, target ("same" | "pool"), text\n- decide: title, text (optional items[]) — NOTE: decision body uses "text", NOT "decision"!\n- note_decision: decision (ID), revision, text\n- replace: decision (ID), revision, title, text (optional items[])',
       parameters: type({
         op: 'string > 0',
         'item?': 'string',
@@ -1505,6 +1620,9 @@ export default function (pi: ExtensionAPI) {
         }
         if (isSubAgent(ctx) && (!turn || turn.root !== root || turn.worker !== currentAgentId(ctx))) {
           throw new Error('Worker has no board assignment for this turn.');
+        }
+        if (params.op === 'decide' && !(typeof params.text === 'string' && params.text.trim()) && typeof params.decision === 'string' && params.decision.trim()) {
+          throw new Error('board op=decide requires "title" and "text" (use "text" for the decision body, not "decision").');
         }
         const result = mutationSummary(
           runBoardCommand(root, actorFor(ctx as unknown as SessionContext, root, turn?.attempt), command as Command),
@@ -1779,7 +1897,7 @@ export default function (pi: ExtensionAPI) {
                   ...(boundItem ? { boardItem: boundItem, boardRoot } : {}),
                   state: agyInlineLaunchPrompt !== undefined ? 'running' : 'idle',
                   unhandled: false,
-                  ...(agyInlineLaunchPrompt !== undefined ? { startedAt: Date.now(), finishedAt: undefined } : {}),
+                  ...(agyInlineLaunchPrompt !== undefined ? { turnSeq: 1, startedAt: Date.now(), finishedAt: undefined } : {}),
                   error: undefined,
                   heartbeatCount: 0,
                 });
@@ -1996,7 +2114,10 @@ export default function (pi: ExtensionAPI) {
           const result = await runPerchCli(args, { signal, timeoutMs: 15000 });
           if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch history failed'));
           const task = tasks.get(targetId);
-          if (task && task.state !== 'running') task.unhandled = false;
+          if (task && task.state !== 'running') {
+            if (task.unhandled) task.acknowledgedAt = Date.now();
+            task.unhandled = false;
+          }
           updatePerchUi(ctx);
           return emit(parseJson(result.stdout) ?? []);
         }
@@ -2036,6 +2157,8 @@ export default function (pi: ExtensionAPI) {
               boardItem: reboundItem,
               boardRoot: reboundItem ? ref?.boardRoot : undefined,
               state: 'idle',
+              finishedAt: undefined,
+              acknowledgedAt: undefined,
             });
             updatePerchUi(ctx);
           }
@@ -2077,9 +2200,22 @@ export default function (pi: ExtensionAPI) {
 
     if (isManagedWorker) return;
 
-    // 1. Perch active task ledger
-    const active = [...tasks.values()].filter(task => task.state === 'running' || task.unhandled);
-    if (active.length) {
+    // 1. Perch workspace view (/perch mode) or active task ledger (plain mode)
+    const allTasks = [...tasks.values()];
+    const active = allTasks.filter(task => task.state === 'running' || task.unhandled);
+    const resumableRetired = [...retiredWorkers.values()].filter(r => isResumableWorker(r));
+    if (perchModeEnabled && (allTasks.length || resumableRetired.length)) {
+      const unhandled = active.filter(task => task.unhandled);
+      pendingLedgerAck = unhandled.length ? new Map(unhandled.map(task => [task.id, task.finishSeq])) : undefined;
+      additions.push({
+        role: 'custom' as const,
+        customType: 'perch-task-ledger',
+        display: false,
+        attribution: 'agent' as const,
+        content: formatWorkspaceView(allTasks, resumableRetired, Date.now()),
+        timestamp: Date.now(),
+      });
+    } else if (active.length) {
       const unhandled = active.filter(task => task.unhandled);
       pendingLedgerAck = unhandled.length ? new Map(unhandled.map(task => [task.id, task.finishSeq])) : undefined;
       additions.push({
@@ -2141,9 +2277,11 @@ export default function (pi: ExtensionAPI) {
       const delivered = pendingLedgerAck;
       pendingLedgerAck = undefined;
       if (msg.stopReason === 'stop') {
+        const ackAt = Date.now();
         for (const [id, seq] of delivered) {
           const task = tasks.get(id);
           if (task && task.finishSeq === seq && task.state !== 'running') {
+            if (task.unhandled) task.acknowledgedAt = ackAt;
             task.unhandled = false;
           }
         }
@@ -2332,6 +2470,8 @@ export default function (pi: ExtensionAPI) {
     const config = loadPerchConfig({ cwd: ctx.cwd });
     if (perchModeEnabled) {
       await syncPerchTools(ctx, config);
+      await reapIdleWorkers(config.idleCloseSeconds);
+      syncIdleReaper(ctx, config);
     }
 
     const file = safeSessionFile(ctx);
@@ -2431,6 +2571,7 @@ export default function (pi: ExtensionAPI) {
       const config = loadPerchConfig({ cwd: ctx.cwd });
       perchModeEnabled = restorePerchModeFromBranch(ctx, config);
       await syncPerchTools(ctx, config);
+      syncIdleReaper(ctx, config);
       updatePerchUi(ctx);
     }
 
@@ -2537,6 +2678,7 @@ export default function (pi: ExtensionAPI) {
       receiptContext = undefined;
       retiredWorkers.clear();
       warnedPromptMessages.clear();
+      stopIdleReaper();
       closeWeb();
       const ui = (ctx as unknown as { ui?: { setStatus?: (k: string, v: string | undefined) => void } }).ui;
       ui?.setStatus?.('board', undefined);
@@ -2555,6 +2697,7 @@ export default function (pi: ExtensionAPI) {
       const config = loadPerchConfig({ cwd: ctx.cwd });
       perchModeEnabled = restorePerchModeFromBranch(ctx, config);
       await syncPerchTools(ctx, config);
+      syncIdleReaper(ctx, config);
       updatePerchUi(ctx);
     }
   });
@@ -2570,6 +2713,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     stopping = true;
+    stopIdleReaper();
     await pauseAndDrain();
     mainRoot = undefined;
     previousRoot = undefined;

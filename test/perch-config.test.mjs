@@ -179,6 +179,8 @@ test('loadPerchConfig defaults allowTools, auto-discovers PERCH_SYSTEM.md by pre
   // 1. Default allowTools when neither allowTools nor disableTools is configured
   const bare = loadPerchConfig({ cwd: projectDir, env });
   assert.deepEqual(bare.allowTools, DEFAULT_ALLOW_TOOLS);
+  assert.equal(bare.allowTools.includes('todo'), false);
+  assert.equal(bare.idleCloseSeconds, 0);
   assert.match(renderPerchSystemPrompt(bare, { cwd: projectDir, env }), /Reuse workers for continuity/);
 
   // 2. Global ~/.omp/agent/PERCH_SYSTEM.md is auto-discovered without config.yml
@@ -191,22 +193,26 @@ test('loadPerchConfig defaults allowTools, auto-discovers PERCH_SYSTEM.md by pre
   // 3. Global config.yml systemPrompt overrides global PERCH_SYSTEM.md; appendSystemPrompt accumulates global -> project
   await writeFile(join(agentDir, 'config.yml'), `
 perch:
+  idleCloseSeconds: 300
   systemPrompt: "# Global Config Inline"
   appendSystemPrompt: "Global append line."
 `);
   const fromGlobalCfg = loadPerchConfig({ cwd: projectDir, env });
+  assert.equal(fromGlobalCfg.idleCloseSeconds, 300);
   assert.match(renderPerchSystemPrompt(fromGlobalCfg, { cwd: projectDir, env }), /# Global Config Inline\n\nGlobal append line\./);
 
-  // 4. Project .omp/PERCH_SYSTEM.md overrides global config.yml systemPrompt
+  // 4. Project .omp/PERCH_SYSTEM.md overrides global config.yml systemPrompt; project idleCloseSeconds overrides global
   await writeFile(join(projectDir, '.omp', 'PERCH_SYSTEM.md'), '# Project Auto Prompt\n');
   await writeFile(join(projectDir, '.omp', 'config.yml'), `
 perch:
+  idleCloseSeconds: 0
   allowTools:
     - perch
     - read
   appendSystemPrompt: "/perch rules: always delegate."
 `);
   const fromProjectFile = loadPerchConfig({ cwd: projectDir, env });
+  assert.equal(fromProjectFile.idleCloseSeconds, 0);
   assert.deepEqual(fromProjectFile.allowTools, ['perch', 'read']);
   const rProjectFile = renderPerchSystemPromptWithWarnings(fromProjectFile, { cwd: projectDir, env });
   assert.equal(rProjectFile.warnings.length, 0, 'inline text starting with / and spaces is not treated as a file path');

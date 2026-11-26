@@ -39,6 +39,7 @@ export type PerchModeConfig = {
   native?: boolean;
   layout: PerchLayout;
   heartbeatSeconds: number;
+  idleCloseSeconds: number;
   discoverTimeoutMs: number;
   allowTools?: string[];
   disableTools: string[];
@@ -52,7 +53,7 @@ export type PerchModeConfig = {
   sources: string[];
 };
 
-export const DEFAULT_ALLOW_TOOLS = Object.freeze(['perch', 'board', 'read', 'ask', 'todo']);
+export const DEFAULT_ALLOW_TOOLS = Object.freeze(['perch', 'board', 'read', 'ask']);
 
 const PROVIDERS = new Set<PerchProvider>(['omp', 'codex', 'claude', 'agy']);
 const LAYOUTS = new Set<PerchLayout>(['stack', 'right', 'tab']);
@@ -448,6 +449,11 @@ export function loadPerchConfig(options: { cwd?: string; env?: NodeJS.ProcessEnv
     ? rawHeartbeat
     : 0;
 
+  const rawIdleClose = merged.idleCloseSeconds;
+  const idleCloseSeconds = typeof rawIdleClose === 'number' && Number.isSafeInteger(rawIdleClose) && rawIdleClose >= 0 && rawIdleClose <= 86400
+    ? rawIdleClose
+    : 0;
+
   const rawDiscover = merged.discoverTimeoutMs;
   const discoverTimeoutMs = typeof rawDiscover === 'number' && Number.isSafeInteger(rawDiscover) && rawDiscover >= 1000 && rawDiscover <= 120000
     ? rawDiscover
@@ -517,6 +523,7 @@ export function loadPerchConfig(options: { cwd?: string; env?: NodeJS.ProcessEnv
     ...(typeof merged.native === 'boolean' ? { native: merged.native } : {}),
     layout,
     heartbeatSeconds,
+    idleCloseSeconds,
     discoverTimeoutMs,
     ...(allowTools !== undefined ? { allowTools } : {}),
     disableTools,
