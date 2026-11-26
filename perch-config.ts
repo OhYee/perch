@@ -31,6 +31,8 @@ export type PerchModeConfig = {
   disableTools: string[];
   systemPrompt?: string;
   systemPromptFiles: string[];
+  appendSystemPrompt?: string;
+  appendSystemPromptFiles: string[];
   workerPromptPrefix?: string;
   board: PerchBoardConfig;
   roles: Record<string, PerchRoleConfig>;
@@ -423,6 +425,10 @@ export function loadPerchConfig(options: { cwd?: string; env?: NodeJS.ProcessEnv
     ? merged.systemPromptFiles.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(s => s.trim())
     : [];
 
+  const appendSystemPromptFiles = Array.isArray(merged.appendSystemPromptFiles)
+    ? merged.appendSystemPromptFiles.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(s => s.trim())
+    : [];
+
   const globalBoard = asRecord(globalPerch?.board);
   const projectBoard = asRecord(projectPerch?.board);
   const mergedBoard = { ...(globalBoard ?? {}), ...(projectBoard ?? {}) };
@@ -449,6 +455,8 @@ export function loadPerchConfig(options: { cwd?: string; env?: NodeJS.ProcessEnv
     disableTools,
     ...(typeof merged.systemPrompt === 'string' && merged.systemPrompt.trim() ? { systemPrompt: merged.systemPrompt.trim() } : {}),
     systemPromptFiles,
+    ...(typeof merged.appendSystemPrompt === 'string' && merged.appendSystemPrompt.trim() ? { appendSystemPrompt: merged.appendSystemPrompt.trim() } : {}),
+    appendSystemPromptFiles,
     ...(typeof merged.workerPromptPrefix === 'string' && merged.workerPromptPrefix.trim() ? { workerPromptPrefix: merged.workerPromptPrefix.trim() } : {}),
     board,
     roles,
@@ -484,47 +492,64 @@ export function renderRolesTable(roles: Record<string, PerchRoleConfig>): string
   return rows.join('\n');
 }
 
-export function renderPerchSystemPrompt(config: PerchModeConfig, options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): string {
-  const env = options.env ?? process.env;
-  const sections: string[] = [
-    '# Perch Mode Active',
-    'You are operating in `/perch` orchestration mode. Dispatch specialist workers exclusively via the `perch` tool (never block with `perch op=wait(timeout>0)` or shell `sleep` loops). After dispatching, present a concise status summary and end your turn to wait for automatic `[Perch async update]` callbacks.',
-  ];
-
-  const roleTable = renderRolesTable(config.roles);
-  if (roleTable) {
-    sections.push(
-      '## Configured Worker Roles (pass `role: "<name>"` to `perch op=start`)\n'
-      + 'Pass `role` directly to `perch({ op: "start", role: "<name>", name: "<short-label>", cwd: "...", prompt: "..." })`; provider, model, native pane, worker identity header, and role constraints are auto-applied.\n\n'
-      + roleTable,
-    );
-  }
-
-  if (config.board.enabled) {
-    sections.push(
-      '## Session Board Integration\n'
-      + 'Use the `board` tool (`op=snapshot`, `create`, `edit`, `assign`, `progress`, `submit`, `approve`, `reject`, `decide`, `replace`) to track work items, acceptance criteria, handoffs, and decisions. '
-      + (config.board.autoCreate
-        ? 'Starting a worker via `perch op=start` without `item` automatically creates and binds a board item (or pass `item` + `boardRole: "execute" | "review"` to bind an existing item). '
-        : 'Pass `item` + `boardRole: "execute" | "review"` to `perch op=start` to bind a worker to a board item. ')
-      + 'Worker completions automatically record a board receipt (a receipt is evidence only, never automatic submission or approval). The user can inspect the board UI anytime via `/board`.',
-    );
-  }
-
-  for (const fileRef of config.systemPromptFiles) {
-    const filePath = expandPath(fileRef, options.cwd, env);
+function readPromptFiles(fileRefs: string[], cwd: string | undefined, env: NodeJS.ProcessEnv): string[] {
+  const bodies: string[] = [];
+  for (const fileRef of fileRefs) {
+    const filePath = expandPath(fileRef, cwd, env);
     try {
       const info = statSync(filePath);
       if (!info.isFile() || info.size > MAX_PROMPT_FILE_BYTES) continue;
       const body = stripMarkdownFrontmatter(readFileSync(filePath, 'utf8'));
-      if (body) sections.push(body);
+      if (body) bodies.push(body);
     } catch {
       // Ignore unreadable optional prompt files so orchestration still starts cleanly.
     }
   }
+  return bodies;
+}
 
-  if (config.systemPrompt) {
-    sections.push(config.systemPrompt);
+function buildMinimalDefaultPrompt(config: PerchModeConfig, roleTable: string): string {
+  const sections: string[] = [
+    '# Perch Mode\n'
+    + 'Use the `perch` tool to dispatch and manage worker sessions asynchronously. '
+    + 'Do not block with `perch op=wait(timeout>0)` or shell sleep loops; end your turn after dispatching and react to `[Perch async update]` callbacks.',
+  ];
+  if (roleTable) {
+    sections.push('## Worker Roles (`perch op=start` with `role`)\n\n' + roleTable);
+  }
+  if (config.board.enabled) {
+    sections.push('## Session Board\nUse the `board` tool to track work items, acceptance criteria, handoffs, and decisions (UI via `/board`).');
+  }
+  return sections.join('\n\n');
+}
+
+export function renderPerchSystemPrompt(config: PerchModeConfig, options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): string {
+  const env = options.env ?? process.env;
+  const roleTable = renderRolesTable(config.roles);
+
+  const overrideParts = [
+    ...readPromptFiles(config.systemPromptFiles, options.cwd, env),
+    ...(config.systemPrompt ? [config.systemPrompt] : []),
+  ];
+
+  const sections: string[] = [];
+  if (overrideParts.length) {
+    const hasRolesPlaceholder = overrideParts.some(part => part.includes('{{roles}}'));
+    const expanded = overrideParts.map(part => part.replaceAll('{{roles}}', roleTable));
+    sections.push(...expanded);
+    if (roleTable && !hasRolesPlaceholder) {
+      sections.push('## Worker Roles (`perch op=start` with `role`)\n\n' + roleTable);
+    }
+  } else {
+    sections.push(buildMinimalDefaultPrompt(config, roleTable));
+  }
+
+  const appendParts = [
+    ...readPromptFiles(config.appendSystemPromptFiles, options.cwd, env),
+    ...(config.appendSystemPrompt ? [config.appendSystemPrompt] : []),
+  ];
+  for (const part of appendParts) {
+    sections.push(part.replaceAll('{{roles}}', roleTable));
   }
 
   return sections.join('\n\n');

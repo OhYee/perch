@@ -116,7 +116,7 @@ test('/perch mode auto-enables from config.yml default:true, disables task, inje
     mkdir(join(home, 'prompts'), { recursive: true }),
   ]);
 
-  await writeFile(join(home, 'prompts', 'director.md'), `---\nname: director\n---\n# Director Protocol\nReport concisely.\n`);
+  await writeFile(join(home, 'prompts', 'director.md'), `---\nname: director\n---\n# Director Protocol\n{{roles}}\nReport concisely.\n`);
   await writeFile(join(agentDir, 'config.yml'), `
 modelRoles:
   slow: openai-codex/gpt-6.2-sol:medium
@@ -130,6 +130,7 @@ perch:
     - task
   systemPromptFiles:
     - ~/prompts/director.md
+  appendSystemPrompt: "Local append note."
   workerPromptPrefix: "[Worker] Do not recurse."
   board:
     enabled: true
@@ -243,13 +244,14 @@ process.exit(0);
   assert.equal(activeTools.includes('board'), true);
   assert.equal(statuses.get('perch'), 'perch');
 
-  // 2. before_agent_start injects configured system prompt + role table
+  // 2. before_agent_start injects configured override system prompt + expanded {{roles}} + appendSystemPrompt
   const before = await handlers.get('before_agent_start')({ reason: 'prompt', prompt: 'help', systemPrompt: ['BASE'] }, ctx);
   assert.ok(Array.isArray(before.systemPrompt));
   assert.equal(before.systemPrompt[0], 'BASE');
-  assert.match(before.systemPrompt[1], /# Perch Mode Active/);
+  assert.doesNotMatch(before.systemPrompt[1], /# Perch Mode/);
   assert.match(before.systemPrompt[1], /# Director Protocol/);
   assert.match(before.systemPrompt[1], /`complex-dev`.*`openai-codex\/gpt-6\.2-sol:medium`/);
+  assert.match(before.systemPrompt[1], /Local append note\./);
 
   // 3. context hook strips stale eager-task-prelude while /perch mode is active
   const filtered = handlers.get('context')({
