@@ -190,8 +190,15 @@ export async function resume(id) {
   } finally { lock.close(); }
 }
 
+function isOmpExecutable(comm) {
+  if (typeof comm !== 'string' || !comm) return false;
+  if (basename(comm) === 'omp') return true;
+  // Tern-managed OMP installs versioned binaries under .../omp/versions/<ver>
+  return /(?:^|\/)omp\/versions\/[0-9][0-9A-Za-z.+-]*$/.test(comm);
+}
+
 export function isInteractiveOmp(p) {
-  if (basename(p.comm) !== 'omp' || !p.tty || p.tty === '?' || p.tty === '??') return false;
+  if (!isOmpExecutable(p.comm) || !p.tty || p.tty === '?' || p.tty === '??') return false;
   let args = p.args.trim();
   const executable = args === p.comm || args.startsWith(`${p.comm} `) ? p.comm : args === 'omp' || args.startsWith('omp ') ? 'omp' : null;
   if (!executable) return false;
@@ -286,7 +293,7 @@ async function leaseSessions(candidates) {
 }
 
 async function persistedHistory(session, limit) {
-  const candidates = (await processes()).filter(p => p.pid === session.pid && basename(p.comm) === 'omp');
+  const candidates = (await processes()).filter(p => p.pid === session.pid && isOmpExecutable(p.comm));
   const before = (await leaseSessions(candidates)).find(row => row.id === session.id && row._journal === session._journal);
   if (!before) throw new Error('OMP session identity or lease changed');
   const stat = await lstat(before._journal);
@@ -350,7 +357,7 @@ export async function list() {
   const snapshot = await processes();
   const live = new Set(snapshot.map(p => p.pid));
   const candidates = snapshot.filter(isInteractiveOmp);
-  const ompProcesses = snapshot.filter(p => basename(p.comm) === 'omp');
+  const ompProcesses = snapshot.filter(p => isOmpExecutable(p.comm));
   const [discovered, native, leased] = await Promise.all([endpoints(live), collabHosts(live), leaseSessions(ompProcesses)]);
   const local = discovered.filter(row => row.close || !discovered.some(other => other.close && other.pid === row.pid && other._sessionId.toLowerCase() === row._sessionId.toLowerCase()));
   const known = mergeSessions(local, leased, native);

@@ -8,8 +8,8 @@ import { assetFilename, validateVersion } from './release-intent.mjs';
 import { sourceVersion } from '../../version.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
-const topLevel = ['cli.mjs', 'diagnostics.mjs', 'help.mjs', 'locale.mjs', 'terminal-input.mjs', 'portable-runtime.mjs', 'update.mjs', 'version.mjs', 'view.mjs', 'omp-extension.ts'];
-const allowed = /^(?:package\.json|README\.md|LICENSE|SECURITY\.md|CONTRIBUTING\.md|AGENTS\.md|releases\/[A-Za-z0-9][A-Za-z0-9.+_-]*\.md|cli\.mjs|diagnostics\.mjs|help\.mjs|locale\.mjs|terminal-input\.mjs|portable-runtime\.mjs|update\.mjs|version\.mjs|view\.mjs|omp-extension\.ts|adapters\/[a-z0-9][a-z0-9-]*\.mjs)$/;
+const topLevel = ['cli.mjs', 'diagnostics.mjs', 'help.mjs', 'locale.mjs', 'terminal-input.mjs', 'portable-runtime.mjs', 'update.mjs', 'version.mjs', 'view.mjs', 'omp-extension.ts', 'perch-config.ts'];
+const allowed = /^(?:package\.json|README\.md|LICENSE|SECURITY\.md|CONTRIBUTING\.md|AGENTS\.md|releases\/[A-Za-z0-9][A-Za-z0-9.+_-]*\.md|cli\.mjs|diagnostics\.mjs|help\.mjs|locale\.mjs|terminal-input\.mjs|portable-runtime\.mjs|update\.mjs|version\.mjs|view\.mjs|omp-extension\.ts|perch-config\.ts|adapters\/[a-z0-9][a-z0-9-]*\.mjs|board\/[a-z0-9][a-z0-9-]*\.ts|board\/assets\/[a-z0-9][a-z0-9-]*\.(?:html|css|js))$/;
 
 export function validatePackageEntries(entries, required) {
   if (!Array.isArray(entries) || entries.some(path => typeof path !== 'string' || path.includes('..') || !allowed.test(path))) throw Error('package contains an unexpected or unsafe file');
@@ -39,7 +39,7 @@ async function main() {
   const staging = mkdtempSync(join(tmpdir(), 'perch-pack-'));
   let packed;
   try {
-    for (const path of ['README.md', 'LICENSE', 'SECURITY.md', 'CONTRIBUTING.md', 'AGENTS.md', 'releases', 'adapters', ...topLevel]) {
+    for (const path of ['README.md', 'LICENSE', 'SECURITY.md', 'CONTRIBUTING.md', 'AGENTS.md', 'releases', 'adapters', 'board', ...topLevel]) {
       cpSync(join(root, path), join(staging, path), { recursive: true });
     }
     if (process.env.PERCH_TRUSTED_RELEASE === '1') {
@@ -59,7 +59,11 @@ async function main() {
   if (`sha512-${createHash('sha512').update(data).digest('base64')}` !== packed.integrity) throw Error('npm pack integrity mismatch');
   const expected = packed.files.map(file => file.path);
   const adapters = readdirSync(join(root, 'adapters')).filter(name => name.endsWith('.mjs')).map(name => `adapters/${name}`);
-  validatePackageEntries(expected, ['package.json', 'README.md', 'LICENSE', 'SECURITY.md', 'CONTRIBUTING.md', 'AGENTS.md', `releases/v${baseVersion}.md`, ...topLevel, ...adapters]);
+  const boardFiles = [
+    ...readdirSync(join(root, 'board')).filter(name => name.endsWith('.ts')).map(name => `board/${name}`),
+    ...readdirSync(join(root, 'board', 'assets')).filter(name => /\.(?:html|css|js)$/.test(name)).map(name => `board/assets/${name}`),
+  ];
+  validatePackageEntries(expected, ['package.json', 'README.md', 'LICENSE', 'SECURITY.md', 'CONTRIBUTING.md', 'AGENTS.md', `releases/v${baseVersion}.md`, ...topLevel, ...adapters, ...boardFiles]);
   const members = run('tar', ['-tzf', archive]).trimEnd().split('\n').map(path => {
     if (!path.startsWith('package/')) throw Error('archive member is outside package/');
     return path.slice('package/'.length);

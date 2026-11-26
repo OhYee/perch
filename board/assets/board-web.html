@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>会话看板</title>
+  <link rel="stylesheet" href="/board.css">
+  <script defer src="/board.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="header-title">
+        <div class="session-info">
+          <h1 id="session-title">会话看板</h1>
+          <p class="session-id"><span class="session-id-label">会话 ID</span> <span id="session-id" class="session-id-value"></span></p>
+        </div>
+      </div>
+      <nav class="board-tabs" aria-label="工作与决策">
+        <button id="work-tab" type="button" aria-current="page">工作 <span id="work-count"></span></button>
+        <button id="decision-tab" type="button">决策 <span id="decision-count"></span></button>
+      </nav>
+      <div class="search-control">
+        <label class="search-label" for="board-search">搜索</label>
+        <input id="board-search" type="search" placeholder="搜索标题或标识" autocomplete="off">
+        <div id="search-results" class="search-results" aria-live="polite" hidden></div>
+      </div>
+      <button id="refresh" type="button">刷新</button>
+    </div>
+  </header>
+  <main>
+    <p id="notice" role="status" aria-live="polite" tabindex="0"></p>
+    <p id="pending" role="status" tabindex="0" hidden>看板有新变化；离开搜索结果后自动显示。</p>
+    <section class="board-section" aria-label="工作与决策">
+      <div id="board-layout" class="board-layout">
+        <aside id="board-list-pane" class="board-list-pane" aria-label="全部工作和决策">
+          <div class="list-heading">
+            <p id="list-heading">全部工作</p>
+            <p id="turn-summary" class="turn-summary" tabindex="0" role="region" aria-label="待处理工作；使用左右方向键或 Home/End 横向浏览" hidden></p>
+          </div>
+          <div id="board-list" class="board-list"></div>
+        </aside>
+        <section id="board-detail-pane" class="board-detail-pane" aria-label="选中项详情">
+          <button id="detail-back" class="detail-back" type="button" hidden>← 返回列表</button>
+          <p id="detail-empty" class="detail-empty">选择工作项或决策以查看详情。</p>
+          <div id="work" class="detail-content"></div>
+          <div id="decisions" class="detail-content" hidden></div>
+        </section>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
