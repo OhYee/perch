@@ -90,8 +90,9 @@ perch:
   default: true
   layout: stack
   heartbeatSeconds: 0
-  systemPromptFiles:
+  appendSystemPromptFiles:
     - ~/.agents/skills/cortex-team/SKILL.md
+  appendSystemPrompt: "Extra append rule."
   roles:
     dev:
       label: 常规开发
@@ -125,10 +126,25 @@ perch:
   assert.equal(cfg.roles.investigate.model, 'gemini-4-neon');
   assert.equal(cfg.roles.investigate.write, false);
 
-  const prompt = renderPerchSystemPrompt(cfg, { cwd: projectDir, env });
-  assert.match(prompt, /# Perch Mode Active/);
-  assert.match(prompt, /`investigate`.*`agy`.*`gemini-4-neon`.*只读/);
-  assert.match(prompt, /`dev`.*`openai-codex\/gpt-6\.2-sol:medium`/);
-  assert.match(prompt, /# Team Rules\nAlways report tables\./);
-  assert.doesNotMatch(prompt, /description: "demo"/);
+  const appended = renderPerchSystemPrompt(cfg, { cwd: projectDir, env });
+  assert.match(appended, /# Perch Mode/);
+  assert.match(appended, /`investigate`.*`agy`.*`gemini-4-neon`.*只读/);
+  assert.match(appended, /`dev`.*`openai-codex\/gpt-6\.2-sol:medium`/);
+  assert.match(appended, /# Team Rules\nAlways report tables\./);
+  assert.match(appended, /Extra append rule\./);
+  assert.doesNotMatch(appended, /description: "demo"/);
+
+  // Override mode: systemPromptFiles replaces built-in skeleton and expands {{roles}} in place
+  const overridePath = join(home, 'PERCH_SYSTEM.md');
+  await writeFile(overridePath, `# Custom Director\n\n{{roles}}\n\nCustom footer.\n`);
+  const overridden = renderPerchSystemPrompt({
+    ...cfg,
+    systemPromptFiles: ['~/PERCH_SYSTEM.md'],
+    appendSystemPromptFiles: [],
+    appendSystemPrompt: 'Appended tail.',
+  }, { cwd: projectDir, env });
+  assert.doesNotMatch(overridden, /# Perch Mode/);
+  assert.match(overridden, /# Custom Director/);
+  assert.equal((overridden.match(/`investigate`/g) ?? []).length, 1, 'roles table expanded once in place');
+  assert.match(overridden, /Custom footer\.\n\nAppended tail\./);
 });
