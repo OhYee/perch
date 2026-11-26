@@ -16,6 +16,10 @@ export type PerchRoleConfig = {
   capabilities?: string;
   constraints?: string;
   promptPrefix?: string;
+  /** Automatically review the director's replies with this role: every assistant turn, or once when the agent run ends. */
+  reviewMode?: 'turn' | 'agent-end';
+  /** Skip automatic review for replies shorter than this many characters. */
+  reviewMinChars?: number;
 };
 
 export type PerchBoardConfig = {
@@ -394,6 +398,9 @@ function parseRoleEntry(name: string, raw: unknown, modelRoles: Record<string, s
     ...(typeof obj.capabilities === 'string' && obj.capabilities.trim() ? { capabilities: obj.capabilities.trim() } : {}),
     ...(typeof obj.constraints === 'string' && obj.constraints.trim() ? { constraints: obj.constraints.trim() } : {}),
     ...(typeof obj.promptPrefix === 'string' && obj.promptPrefix.trim() ? { promptPrefix: obj.promptPrefix.trim() } : {}),
+    ...(obj.reviewMode === 'turn' || obj.reviewMode === 'agent-end' ? { reviewMode: obj.reviewMode } : {}),
+    ...(typeof obj.reviewMinChars === 'number' && Number.isSafeInteger(obj.reviewMinChars) && obj.reviewMinChars >= 0 && obj.reviewMinChars <= 100000
+      ? { reviewMinChars: obj.reviewMinChars } : {}),
   };
 }
 
@@ -627,7 +634,7 @@ export function renderRolesTable(roles: Record<string, PerchRoleConfig>): string
   for (const role of entries) {
     const label = role.label ?? role.name;
     const write = role.write === false ? '只读' : role.write === true ? '可写' : '默认';
-    const desc = [role.capabilities, role.constraints].filter(Boolean).join('；') || '—';
+    const desc = [role.capabilities, role.constraints, role.reviewMode ? `自动评审（${role.reviewMode}）：其建议会以 [Perch review: ${role.name}] 到达` : undefined].filter(Boolean).join('；') || '—';
     rows.push(`| \`${role.name}\` | ${label} | \`${role.provider}\` | \`${role.model ?? 'default'}\` | ${write} | ${desc.replaceAll('|', '\\|')} |`);
   }
   return rows.join('\n');
