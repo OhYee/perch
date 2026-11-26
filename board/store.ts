@@ -463,6 +463,55 @@ export class BoardStore {
     }).immediate();
   }
 
+  rebindWorker(oldWorker: string, newWorker: string): string | undefined {
+    required(oldWorker, 'old worker');
+    required(newWorker, 'new worker');
+    if (newWorker === 'main' || newWorker === 'user') return undefined;
+    return this.db.transaction(() => {
+      const binding = this.bindingForWorker(oldWorker);
+      if (!binding) return undefined;
+      const item = this.db.query('SELECT * FROM items WHERE id = ?').get(binding.item) as ItemRow | null;
+      if (!item || item.state === 'done' || item.state === 'cancelled') return undefined;
+
+      // Case 1: item was released when oldWorker closed -> re-assign via normal assign transition
+      if (binding.role === 'execute' && item.state === 'unassigned') {
+        try {
+          this.requireNoPendingSpawn(item.id);
+          this.applyCommand({ kind: 'main', id: 'main' }, { op: 'assign', item: item.id, worker: newWorker, role: 'execute' });
+          return item.id;
+        } catch {
+          return undefined;
+        }
+      }
+      if (binding.role === 'review' && item.state === 'awaiting_review' && item.owner !== newWorker) {
+        try {
+          this.requireNoPendingSpawn(item.id);
+          this.applyCommand({ kind: 'main', id: 'main' }, { op: 'assign', item: item.id, worker: newWorker, role: 'review' });
+          return item.id;
+        } catch {
+          return undefined;
+        }
+      }
+
+      // Case 2: item is still actively held by oldWorker (e.g. crashed native worker revived with new session ID)
+      const activeMatch = (binding.role === 'execute' && item.state === 'working' && item.owner === oldWorker) ||
+        (binding.role === 'review' && item.state === 'reviewing' && item.reviewer === oldWorker);
+      if (!activeMatch) return undefined;
+      if (newWorker === oldWorker) return item.id;
+
+      if (binding.role === 'execute') {
+        this.db.query('UPDATE items SET owner = ? WHERE id = ?').run(newWorker, item.id);
+      } else {
+        this.db.query('UPDATE items SET reviewer = ? WHERE id = ?').run(newWorker, item.id);
+      }
+      this.db.query(
+        'INSERT INTO bindings(worker,item,role,attempt,initial_attempt) VALUES(?,?,?,?,?) ON CONFLICT(worker) DO UPDATE SET item=excluded.item, role=excluded.role, attempt=excluded.attempt, initial_attempt=excluded.initial_attempt',
+      ).run(newWorker, item.id, binding.role, item.attempt, item.attempt);
+      this.record('item', item.id, 'main', `Worker ${oldWorker} resumed as ${newWorker}.`, 'assign', item.attempt);
+      return item.id;
+    }).immediate();
+  }
+
   failSpawn(token: string, reason: string): void {
     required(token, 'spawn token');
     required(reason, 'spawn failure reason');

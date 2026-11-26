@@ -6,9 +6,9 @@ const syntax = {
   list: ['perch list [--provider omp|codex|claude|agy] [--json] [--lang zh|en]'],
   start: [
     'perch start <omp|codex|claude> [--cwd dir] [--model model] [--executable path] [--pane right|tern|herdr|tmux] [--workspace name] [--tab name] [--json] [--lang zh|en] [-- provider-args...]',
-    'perch start <omp|codex|claude> [prompt] --native --pane right|tern|herdr|tmux [--cwd dir] [--model model] [--executable path] [--workspace name] [--tab name] [--json] [--lang zh|en] [-- provider-args...]',
+    'perch start <omp|codex|claude> [prompt] --native --pane right|tern|herdr|tmux [--cwd dir] [--model model] [--resume id] [--executable path] [--workspace name] [--tab name] [--json] [--lang zh|en] [-- provider-args...]',
     'perch start agy [--cwd dir] [--model model] [--pane right|tern|herdr|tmux] [--workspace name] [--tab name] [--json] [--lang zh|en]',
-    'perch start agy [prompt] --native --pane right|tern|herdr|tmux [--cwd dir] [--model model] [--workspace name] [--tab name] [--json] [--lang zh|en]',
+    'perch start agy [prompt] --native --pane right|tern|herdr|tmux [--cwd dir] [--model model] [--resume id] [--workspace name] [--tab name] [--json] [--lang zh|en]',
   ],
   resume: ['perch resume <id> [--json] [--lang zh|en]'],
   send: [

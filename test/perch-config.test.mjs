@@ -1,9 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadPerchConfig, parseYaml, renderPerchSystemPrompt, resolveModelAlias } from '../perch-config.ts';
+import {
+  DEFAULT_ALLOW_TOOLS,
+  loadPerchConfig,
+  parseYaml,
+  renderPerchSystemPrompt,
+  renderPerchSystemPromptWithWarnings,
+  resolveModelAlias,
+} from '../perch-config.ts';
 
 test('parseYaml handles real OMP config.yml structures including modelRoles, arrays, and folded block scalars', () => {
   const sample = `
@@ -134,17 +141,95 @@ perch:
   assert.match(appended, /Extra append rule\./);
   assert.doesNotMatch(appended, /description: "demo"/);
 
-  // Override mode: systemPromptFiles replaces built-in skeleton and expands {{roles}} in place
-  const overridePath = join(home, 'PERCH_SYSTEM.md');
-  await writeFile(overridePath, `# Custom Director\n\n{{roles}}\n\nCustom footer.\n`);
-  const overridden = renderPerchSystemPrompt({
-    ...cfg,
-    systemPromptFiles: ['~/PERCH_SYSTEM.md'],
-    appendSystemPromptFiles: [],
-    appendSystemPrompt: 'Appended tail.',
-  }, { cwd: projectDir, env });
+  // Override mode: project-local systemPrompt path replaces built-in skeleton and expands {{roles}} in place
+  const projectPrompt = join(projectDir, '.omp', 'custom-director.md');
+  await writeFile(projectPrompt, `# Custom Director\n\n{{roles}}\n\nCustom footer.\n`);
+  await writeFile(join(projectDir, '.omp', 'config.yml'), `
+perch:
+  systemPrompt: ./.omp/custom-director.md
+  appendSystemPrompt: "Appended tail."
+  roles:
+    dev:
+      label: 项目定制开发
+      provider: omp
+      model: "@slow"
+      write: true
+`);
+  const overrideCfg = loadPerchConfig({ cwd: projectDir, env });
+  const overridden = renderPerchSystemPrompt(overrideCfg, { cwd: projectDir, env });
   assert.doesNotMatch(overridden, /# Perch Mode/);
   assert.match(overridden, /# Custom Director/);
   assert.equal((overridden.match(/`investigate`/g) ?? []).length, 1, 'roles table expanded once in place');
-  assert.match(overridden, /Custom footer\.\n\nAppended tail\./);
+  assert.match(overridden, /Custom footer\.\n\n# Team Rules\nAlways report tables\.\n\nExtra append rule\.\n\nAppended tail\./);
+});
+
+test('loadPerchConfig defaults allowTools, auto-discovers PERCH_SYSTEM.md by precedence, stacks appendSystemPrompt, confines project paths, and warns on missing/escaped paths', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'perch-config-prec-'));
+  const home = join(root, 'home');
+  const agentDir = join(home, '.omp', 'agent');
+  const projectDir = join(root, 'project');
+  await Promise.all([
+    mkdir(agentDir, { recursive: true }),
+    mkdir(join(projectDir, '.omp'), { recursive: true }),
+  ]);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const env = { HOME: home };
+
+  // 1. Default allowTools when neither allowTools nor disableTools is configured
+  const bare = loadPerchConfig({ cwd: projectDir, env });
+  assert.deepEqual(bare.allowTools, DEFAULT_ALLOW_TOOLS);
+  assert.match(renderPerchSystemPrompt(bare, { cwd: projectDir, env }), /Reuse workers for continuity/);
+
+  // 2. Global ~/.omp/agent/PERCH_SYSTEM.md is auto-discovered without config.yml
+  await writeFile(join(agentDir, 'PERCH_SYSTEM.md'), '# Global File Prompt\n{{roles}}\n');
+  const fromGlobalFile = loadPerchConfig({ cwd: projectDir, env });
+  const rGlobalFile = renderPerchSystemPromptWithWarnings(fromGlobalFile, { cwd: projectDir, env });
+  assert.equal(rGlobalFile.warnings.length, 0);
+  assert.match(rGlobalFile.prompt, /# Global File Prompt/);
+
+  // 3. Global config.yml systemPrompt overrides global PERCH_SYSTEM.md; appendSystemPrompt accumulates global -> project
+  await writeFile(join(agentDir, 'config.yml'), `
+perch:
+  systemPrompt: "# Global Config Inline"
+  appendSystemPrompt: "Global append line."
+`);
+  const fromGlobalCfg = loadPerchConfig({ cwd: projectDir, env });
+  assert.match(renderPerchSystemPrompt(fromGlobalCfg, { cwd: projectDir, env }), /# Global Config Inline\n\nGlobal append line\./);
+
+  // 4. Project .omp/PERCH_SYSTEM.md overrides global config.yml systemPrompt
+  await writeFile(join(projectDir, '.omp', 'PERCH_SYSTEM.md'), '# Project Auto Prompt\n');
+  await writeFile(join(projectDir, '.omp', 'config.yml'), `
+perch:
+  allowTools:
+    - perch
+    - read
+  appendSystemPrompt: "/perch rules: always delegate."
+`);
+  const fromProjectFile = loadPerchConfig({ cwd: projectDir, env });
+  assert.deepEqual(fromProjectFile.allowTools, ['perch', 'read']);
+  const rProjectFile = renderPerchSystemPromptWithWarnings(fromProjectFile, { cwd: projectDir, env });
+  assert.equal(rProjectFile.warnings.length, 0, 'inline text starting with / and spaces is not treated as a file path');
+  assert.match(rProjectFile.prompt, /^# Project Auto Prompt\n\nGlobal append line\.\n\n\/perch rules: always delegate\.$/);
+
+  // 5. Missing explicit file path and project-escaping paths emit warnings and never leak secrets outside project root
+  const secretFile = join(home, 'secret.txt');
+  await writeFile(secretFile, 'SUPER_SECRET_TOKEN');
+  await rm(join(projectDir, '.omp', 'PERCH_SYSTEM.md'));
+  await symlink(secretFile, join(projectDir, '.omp', 'PERCH_SYSTEM.md'));
+  await writeFile(join(projectDir, '.omp', 'config.yml'), `
+perch:
+  systemPrompt: ./missing-prompt.md
+  appendSystemPrompt:
+    - ~/secret.txt
+    - "Inline still works."
+`);
+  const withMissing = loadPerchConfig({ cwd: projectDir, env });
+  const rMissing = renderPerchSystemPromptWithWarnings(withMissing, { cwd: projectDir, env });
+  assert.ok(rMissing.warnings.some(w => w.includes('missing-prompt.md')));
+  assert.ok(rMissing.warnings.some(w => w.includes('PERCH_SYSTEM.md') && w.includes('non-symlink')));
+  assert.ok(rMissing.warnings.some(w => w.includes('~/secret.txt') && w.includes('escape project root')));
+  assert.doesNotMatch(rMissing.prompt, /SUPER_SECRET_TOKEN/);
+  assert.match(rMissing.prompt, /# Global Config Inline/);
+  assert.match(rMissing.prompt, /Inline still works\./);
 });

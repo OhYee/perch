@@ -124,6 +124,7 @@ test('OMP extension registers perch tool, tracks ledger with name/owned, pushes 
     PERCH_FIXTURE_LOG: process.env.PERCH_FIXTURE_LOG,
     PERCH_FIXTURE_RELEASE: process.env.PERCH_FIXTURE_RELEASE,
     PERCH_HEARTBEAT_MS: process.env.PERCH_HEARTBEAT_MS,
+    PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
   };
   await writeFile(bin, fakePerchScript);
   await chmod(bin, 0o700);
@@ -131,6 +132,7 @@ test('OMP extension registers perch tool, tracks ledger with name/owned, pushes 
   process.env.PERCH_FIXTURE_LOG = logPath;
   process.env.PERCH_FIXTURE_RELEASE = releasePath;
   process.env.PERCH_HEARTBEAT_MS = '0';
+  process.env.PI_CODING_AGENT_DIR = join(dir, 'agent');
 
   const h = createHarness(dir);
   try {
@@ -369,6 +371,7 @@ process.stdin.on('end', () => {
     PERCH_FIXTURE_RELEASE: process.env.PERCH_FIXTURE_RELEASE,
     PERCH_HEARTBEAT_MS: process.env.PERCH_HEARTBEAT_MS,
     PERCH_NATIVE_DISCOVER_MS: process.env.PERCH_NATIVE_DISCOVER_MS,
+    PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
   };
   await writeFile(bin, nativeScript);
   await chmod(bin, 0o700);
@@ -378,6 +381,7 @@ process.stdin.on('end', () => {
   process.env.PERCH_FIXTURE_RELEASE = releasePath;
   process.env.PERCH_HEARTBEAT_MS = '0';
   process.env.PERCH_NATIVE_DISCOVER_MS = '3000';
+  process.env.PI_CODING_AGENT_DIR = join(dir, 'agent');
 
   const h = createHarness(dir);
   h.ctx.mode = 'tui';
