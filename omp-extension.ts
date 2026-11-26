@@ -11,6 +11,7 @@ import { systemLanguage } from './locale.mjs';
 import { translateDiagnostic } from './diagnostics.mjs';
 import { loadPerchConfig, renderPerchSystemPromptWithWarnings, renderRolesTable, type PerchModeConfig, type PerchRoleConfig } from './perch-config.ts';
 import { BoardStore, type Command, type ReceiptNotice } from './board/store.ts';
+import { createBoardBridge } from './board/bridge.ts';
 import { DiscussionFailure, summarizeDiscussion, type DiscussionModelContext } from './board/discussion.ts';
 import { startBoardWeb } from './board/web.ts';
 import {
@@ -364,6 +365,38 @@ function stageAgyNativePrompt(uid: number, text: string): string {
   return filePath;
 }
 
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function perchCommandLine(): string {
+  const [command, prefix] = resolvePerchInvocation();
+  return [command, ...prefix].map(shellQuote).join(' ');
+}
+
+function buildBoardWorkerGuide(commandLine: string, socket: string, token: string, role: 'execute' | 'review', itemId: string | undefined): string {
+  const base = `${commandLine} board <op> --socket ${shellQuote(socket)} --token ${token}`;
+  const ops = [
+    '  snapshot                         live item, acceptance criteria, handoffs and related decisions',
+    '  progress --text "..." [--handoff]   record milestones, confirmed/ruled-out findings, blockers (--handoff keeps it for the next worker)',
+    ...(role === 'execute'
+      ? ['  submit --text "evidence"          submit for independent review once the acceptance criteria are met']
+      : [
+        '  approve --text "evidence"         approve the item when it meets the criteria (you cannot review work you executed)',
+        '  reject --target same|pool --text "reason"   send it back to the same executor or the pool',
+      ]),
+    '  decide --title "..." --text "..." record a decision on your item',
+  ];
+  return [
+    '[Session Board access]',
+    `You are bound to board item ${itemId ?? '(assigned by the director)'} as ${role}. Read and update it from your shell (works in any provider):`,
+    `  ${base}`,
+    'Operations (each runs against your own item only; errors are printed and nothing is applied):',
+    ...ops,
+    'Use it at real milestones and before handoff, not for routine steps. Your final reply is recorded automatically but never submits or approves.',
+  ].join('\n');
+}
+
 function buildWorkerPrompt(
   rawPrompt: string,
   config: PerchModeConfig,
@@ -546,6 +579,7 @@ export default function (pi: ExtensionAPI) {
   const ownedSessions = new Set<string>();
   const tasks = new Map<string, TrackedTask>();
   const retiredWorkers = new Map<string, RetiredWorker>();
+  const boardBridge = createBoardBridge(uid);
   const warnedPromptMessages = new Set<string>();
   const watchers = new Map<string, WatcherEntry>();
   const inFlightSends = new Set<string>();
@@ -1122,7 +1156,9 @@ export default function (pi: ExtensionAPI) {
   function rebindBoardForRevivedWorker(boardRoot: string | undefined, oldWorkerId: string, newWorkerId: string): string | undefined {
     if (!boardRoot) return undefined;
     try {
-      return withBoard(boardRoot, store => store.rebindWorker(oldWorkerId, newWorkerId), false);
+      const reboundItem = withBoard(boardRoot, store => store.rebindWorker(oldWorkerId, newWorkerId), false);
+      if (reboundItem) boardBridge.rebind(oldWorkerId, newWorkerId);
+      return reboundItem;
     } catch {
       return undefined;
     }
@@ -1811,7 +1847,28 @@ export default function (pi: ExtensionAPI) {
             }
           }
 
+          let boardGrantToken: string | undefined;
+          if (shouldBindBoard && boardRoot) {
+            try {
+              const boardRole = params.boardRole ?? 'execute';
+              const socket = await boardBridge.ensure();
+              boardGrantToken = boardBridge.mint(boardRoot, reservedItemId ?? '', boardRole);
+              boardContextPrompt = [
+                boardContextPrompt,
+                buildBoardWorkerGuide(perchCommandLine(), socket, boardGrantToken, boardRole, reservedItemId),
+              ].filter(Boolean).join('\n\n');
+            } catch (error) {
+              boardGrantToken = undefined;
+              const warning = `Perch board access is unavailable for this worker: ${error instanceof Error ? error.message : String(error)}`;
+              if (!warnedPromptMessages.has(warning)) {
+                warnedPromptMessages.add(warning);
+                ctx.ui?.notify?.(warning, 'warning');
+              }
+            }
+          }
+
           const failBoardReservation = (reason: string) => {
+            if (boardGrantToken) boardBridge.revoke(boardGrantToken);
             if (boardToken && boardRoot) {
               try {
                 withBoard(boardRoot, store => {
@@ -1824,7 +1881,9 @@ export default function (pi: ExtensionAPI) {
           const commitBoardReservation = (workerId: string): string | undefined => {
             if (!boardToken || !boardRoot) return undefined;
             withBoard(boardRoot, store => store.commitSpawn(boardToken!, workerId));
-            return withBoard(boardRoot, store => store.bindingForWorker(workerId)?.item, false) ?? reservedItemId;
+            const bound = withBoard(boardRoot, store => store.bindingForWorker(workerId)?.item, false) ?? reservedItemId;
+            if (boardGrantToken) boardBridge.bind(boardGrantToken, workerId, bound);
+            return bound;
           };
 
           const effectivePrompt = params.prompt !== undefined
@@ -2735,6 +2794,7 @@ export default function (pi: ExtensionAPI) {
     if (toClose.length) {
       await Promise.allSettled(toClose.map(id => runPerchCli(['close', id, '--json'], { timeoutMs: 3000 }).catch(() => {})));
     }
+    boardBridge.close();
     server?.close();
     try { unlinkSync(path); } catch {}
   });
