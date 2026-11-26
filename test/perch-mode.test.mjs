@@ -542,9 +542,16 @@ process.exit(0);
     sendUserMessage: async () => {},
   });
 
-  // 1. Default allowTools restricts director to [ask, perch, read, todo, board] (no bash/edit/write/grep/glob/task)
+  // 1. Default allowTools restricts director to [ask, board, perch, read] (no bash/edit/write/grep/glob/task/todo)
   await handlers.get('session_start')({}, ctx);
-  assert.deepEqual([...activeTools].sort(), ['ask', 'board', 'perch', 'read', 'todo']);
+  assert.deepEqual([...activeTools].sort(), ['ask', 'board', 'perch', 'read']);
+
+  // 1b. board op=decide rejects misplaced "decision" param with a clear hint
+  const boardTool = tools.get('board');
+  await assert.rejects(
+    boardTool.execute('b-bad', { op: 'decide', title: 'Test', decision: 'body' }, undefined, undefined, ctx),
+    /use "text" for the decision body, not "decision"/,
+  );
 
   // 2. Missing explicit prompt file emits a deduped TUI warning once
   await handlers.get('before_agent_start')({ reason: 'prompt', prompt: 'hi', systemPrompt: ['BASE'] }, ctx);
@@ -598,7 +605,7 @@ process.exit(0);
     op: 'send',
     id: 'scout',
     text: 'check second log file',
-    notify: false,
+    notify: true,
   }, undefined, undefined, ctx);
   assert.equal(revivedAgy.details.autoResumed, true);
   assert.equal(revivedAgy.details.mode, 'native');
@@ -608,6 +615,14 @@ process.exit(0);
   const boardStore = new BoardStore(boardPath(sessionFile));
   t.after(() => boardStore.close());
   assert.equal(boardStore.bindingForWorker(revivedAgy.details.id)?.item, agy.details.boardItem);
+
+  // Wait for scout's watcher to finish so scout transitions to completed/unhandled, then ack via context + message_end
+  await until(() => {
+    const c = handlers.get('context')({ messages: [] }, ctx);
+    const txt = c?.messages?.find(m => m.customType === 'perch-task-ledger')?.content ?? '';
+    return /scout.*completed \[UNHANDLED/.test(txt);
+  });
+  handlers.get('message_end')({ message: { role: 'assistant', stopReason: 'stop' } }, ctx);
 
   // 5. Native OMP worker: start -> unexpectedly disappears from live list -> send auto-resumes with --resume <uuid>!
   const nativeOmp = await perch.execute('o-1', {
@@ -637,10 +652,20 @@ process.exit(0);
   assert.equal(waitRes.details.nonBlocking, true);
   assert.equal(waitRes.details.watcherAttached, false);
 
-  // 7. Expanding allowTools in config.yml while /perch mode is ON restores newly allowed tools from savedToolsBeforePerch
+  // 6b. Complete Perch workspace view in /perch mode shows running, handled idle open pane (scout), AND closed resumable workers!
+  await perch.execute('m-close-2', { op: 'close', id: 'worker-managed' }, undefined, undefined, ctx);
+  const viewCtx = handlers.get('context')({ messages: [] }, ctx);
+  const viewText = viewCtx.messages.find(m => m.customType === 'perch-task-ledger')?.content ?? '';
+  assert.match(viewText, /\[Perch workspace view\]/);
+  assert.match(viewText, /coder.*running \(turn #/);
+  assert.match(viewText, /scout.*idle \(finished .*open pane/);
+  assert.match(viewText, /Closed resumable workers.*worker-managed/);
+
+  // 7. Expanding allowTools AND idleCloseSeconds: 1 auto-reaps handled idle scout pane after 1s while keeping running coder open!
   await writeFile(join(agentDir, 'config.yml'), `
 perch:
   default: true
+  idleCloseSeconds: 1
   allowTools:
     - perch
     - board
@@ -650,8 +675,15 @@ perch:
     enabled: true
     autoCreate: false
 `);
+  await sleep(1100);
   await handlers.get('before_agent_start')({ reason: 'prompt', prompt: 'reload tools', systemPrompt: ['BASE'] }, ctx);
   assert.deepEqual([...activeTools].sort(), ['board', 'grep', 'perch', 'read']);
+
+  const afterReapCtx = handlers.get('context')({ messages: [] }, ctx);
+  const afterReapText = afterReapCtx.messages.find(m => m.customType === 'perch-task-ledger')?.content ?? '';
+  assert.match(afterReapText, /coder.*running \(turn #/, 'running worker must not be reaped');
+  assert.doesNotMatch(afterReapText, /scout.*open pane/, 'expired idle scout pane must be auto-closed');
+  assert.match(afterReapText, /Closed resumable workers.*scout/, 'auto-closed scout must remain resumable');
 
   // Verify CLI invocations for --resume on AGY and OMP
   const calls = (await readFile(perchLog, 'utf8')).trim().split('\n').map(JSON.parse);
