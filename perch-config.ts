@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export type PerchProvider = 'omp' | 'codex' | 'claude' | 'agy';
 export type PerchLayout = 'stack' | 'right' | 'tab';
@@ -22,22 +23,36 @@ export type PerchBoardConfig = {
   autoCreate: boolean;
 };
 
+export type PerchPromptEntry = {
+  value: string;
+  kind: 'file' | 'auto';
+};
+
+export type PerchPromptCandidate = {
+  scope: 'global' | 'project';
+  entries: PerchPromptEntry[];
+  baseDir: string;
+};
+
 export type PerchModeConfig = {
   default: boolean;
   native?: boolean;
   layout: PerchLayout;
   heartbeatSeconds: number;
   discoverTimeoutMs: number;
+  allowTools?: string[];
   disableTools: string[];
-  systemPrompt?: string;
-  systemPromptFiles: string[];
-  appendSystemPrompt?: string;
-  appendSystemPromptFiles: string[];
+  /** Ordered system prompt override candidates (highest priority first). */
+  systemPromptCandidates: PerchPromptCandidate[];
+  /** Ordered append prompt layers (global then project). */
+  appendPromptLayers: PerchPromptCandidate[];
   workerPromptPrefix?: string;
   board: PerchBoardConfig;
   roles: Record<string, PerchRoleConfig>;
   sources: string[];
 };
+
+export const DEFAULT_ALLOW_TOOLS = Object.freeze(['perch', 'board', 'read', 'ask', 'todo']);
 
 const PROVIDERS = new Set<PerchProvider>(['omp', 'codex', 'claude', 'agy']);
 const LAYOUTS = new Set<PerchLayout>(['stack', 'right', 'tab']);
@@ -307,13 +322,25 @@ export function parseYaml(source: string): unknown {
     return { value: out, next: i };
   }
 
-  // Keep tokenizeYaml referenced for quick empty check
   if (!tokenizeYaml(source).length) return {};
   return parseNode(0, 0).value;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function asStringList(value: unknown): string[] {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map(item => item.trim());
+  }
+  return [];
 }
 
 function readYamlFile(path: string): Record<string, unknown> | undefined {
@@ -379,11 +406,20 @@ function extractModelRoles(doc: Record<string, unknown> | undefined): Record<str
   return out;
 }
 
+function extractPromptEntries(section: Record<string, unknown> | undefined, primaryKey: string, legacyFilesKey: string): PerchPromptEntry[] {
+  if (!section) return [];
+  return [
+    ...asStringList(section[legacyFilesKey]).map(value => ({ value, kind: 'file' as const })),
+    ...asStringList(section[primaryKey]).map(value => ({ value, kind: 'auto' as const })),
+  ];
+}
+
 export function loadPerchConfig(options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): PerchModeConfig {
   const env = options.env ?? process.env;
   const agentDir = resolveOmpAgentDir(env);
   const globalPath = join(agentDir, 'config.yml');
-  const projectPath = options.cwd ? join(resolve(options.cwd), '.omp', 'config.yml') : undefined;
+  const projectBase = options.cwd ? resolve(options.cwd) : undefined;
+  const projectPath = projectBase ? join(projectBase, '.omp', 'config.yml') : undefined;
 
   const globalDoc = readYamlFile(globalPath);
   const projectDoc = projectPath && projectPath !== globalPath ? readYamlFile(projectPath) : undefined;
@@ -417,17 +453,47 @@ export function loadPerchConfig(options: { cwd?: string; env?: NodeJS.ProcessEnv
     ? rawDiscover
     : 40000;
 
-  const disableTools = Array.isArray(merged.disableTools)
-    ? merged.disableTools.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(s => s.trim())
-    : ['task'];
+  const hasExplicitAllow = Array.isArray(merged.allowTools);
+  const hasExplicitDisable = Array.isArray(merged.disableTools);
+  const allowTools = hasExplicitAllow
+    ? asStringList(merged.allowTools)
+    : hasExplicitDisable
+      ? undefined
+      : [...DEFAULT_ALLOW_TOOLS];
+  const disableTools = hasExplicitDisable ? asStringList(merged.disableTools) : ['task'];
 
-  const systemPromptFiles = Array.isArray(merged.systemPromptFiles)
-    ? merged.systemPromptFiles.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(s => s.trim())
-    : [];
+  const globalAutoFile = join(agentDir, 'PERCH_SYSTEM.md');
+  const projectAutoFile = projectBase ? join(projectBase, '.omp', 'PERCH_SYSTEM.md') : undefined;
+  const hasProjectAuto = !!(projectAutoFile && projectAutoFile !== globalAutoFile && existsSync(projectAutoFile));
+  const hasGlobalAuto = existsSync(globalAutoFile);
 
-  const appendSystemPromptFiles = Array.isArray(merged.appendSystemPromptFiles)
-    ? merged.appendSystemPromptFiles.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(s => s.trim())
-    : [];
+  // System prompt override priority: project config > project PERCH_SYSTEM.md > global config > global PERCH_SYSTEM.md > built-in
+  const systemPromptCandidates: PerchPromptCandidate[] = [];
+  const projectSystemEntries = extractPromptEntries(projectPerch, 'systemPrompt', 'systemPromptFiles');
+  if (projectSystemEntries.length && projectBase) {
+    systemPromptCandidates.push({ scope: 'project', entries: projectSystemEntries, baseDir: projectBase });
+  }
+  if (hasProjectAuto && projectAutoFile && projectBase) {
+    systemPromptCandidates.push({ scope: 'project', entries: [{ value: projectAutoFile, kind: 'file' }], baseDir: projectBase });
+  }
+  const globalSystemEntries = extractPromptEntries(globalPerch, 'systemPrompt', 'systemPromptFiles');
+  if (globalSystemEntries.length) {
+    systemPromptCandidates.push({ scope: 'global', entries: globalSystemEntries, baseDir: agentDir });
+  }
+  if (hasGlobalAuto) {
+    systemPromptCandidates.push({ scope: 'global', entries: [{ value: globalAutoFile, kind: 'file' }], baseDir: agentDir });
+  }
+
+  // Append prompt layers accumulate: global -> project
+  const appendPromptLayers: PerchPromptCandidate[] = [];
+  const globalAppendEntries = extractPromptEntries(globalPerch, 'appendSystemPrompt', 'appendSystemPromptFiles');
+  if (globalAppendEntries.length) {
+    appendPromptLayers.push({ scope: 'global', entries: globalAppendEntries, baseDir: agentDir });
+  }
+  const projectAppendEntries = extractPromptEntries(projectPerch, 'appendSystemPrompt', 'appendSystemPromptFiles');
+  if (projectAppendEntries.length && projectBase) {
+    appendPromptLayers.push({ scope: 'project', entries: projectAppendEntries, baseDir: projectBase });
+  }
 
   const globalBoard = asRecord(globalPerch?.board);
   const projectBoard = asRecord(projectPerch?.board);
@@ -452,11 +518,10 @@ export function loadPerchConfig(options: { cwd?: string; env?: NodeJS.ProcessEnv
     layout,
     heartbeatSeconds,
     discoverTimeoutMs,
+    ...(allowTools !== undefined ? { allowTools } : {}),
     disableTools,
-    ...(typeof merged.systemPrompt === 'string' && merged.systemPrompt.trim() ? { systemPrompt: merged.systemPrompt.trim() } : {}),
-    systemPromptFiles,
-    ...(typeof merged.appendSystemPrompt === 'string' && merged.appendSystemPrompt.trim() ? { appendSystemPrompt: merged.appendSystemPrompt.trim() } : {}),
-    appendSystemPromptFiles,
+    systemPromptCandidates,
+    appendPromptLayers,
     ...(typeof merged.workerPromptPrefix === 'string' && merged.workerPromptPrefix.trim() ? { workerPromptPrefix: merged.workerPromptPrefix.trim() } : {}),
     board,
     roles,
@@ -464,16 +529,85 @@ export function loadPerchConfig(options: { cwd?: string; env?: NodeJS.ProcessEnv
   };
 }
 
-function expandPath(rawPath: string, cwd: string | undefined, env: NodeJS.ProcessEnv): string {
+function isExplicitFilePath(entry: string): boolean {
+  if (!entry || /[\r\n]/.test(entry)) return false;
+  if (entry.startsWith('~/') || entry.startsWith('./') || entry.startsWith('../') || entry.startsWith('file://')) {
+    return true;
+  }
+  if (entry.startsWith('/') && !/\s/.test(entry)) {
+    return true;
+  }
+  return !/\s/.test(entry) && /\.(?:md|txt|prompt)$/i.test(entry);
+}
+
+function expandPath(rawPath: string, baseDir: string, env: NodeJS.ProcessEnv): string {
+  if (rawPath.startsWith('file://')) {
+    try { return fileURLToPath(rawPath); } catch { /* fall through */ }
+  }
   const home = env.HOME ? resolve(env.HOME) : resolve(homedir());
   if (rawPath === '~') return home;
   if (rawPath.startsWith('~/')) return join(home, rawPath.slice(2));
-  return isAbsolute(rawPath) ? rawPath : resolve(cwd || process.cwd(), rawPath);
+  return isAbsolute(rawPath) ? rawPath : resolve(baseDir, rawPath);
 }
 
 function stripMarkdownFrontmatter(text: string): string {
   const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(text);
   return match ? text.slice(match[0].length).trim() : text.trim();
+}
+
+function isWithinDir(filePath: string, baseDir: string): boolean {
+  try {
+    const realBase = realpathSync(baseDir);
+    const realFile = realpathSync(filePath);
+    return realFile === realBase || realFile.startsWith(`${realBase}${sep}`);
+  } catch {
+    return false;
+  }
+}
+
+function resolvePromptEntries(
+  candidate: PerchPromptCandidate,
+  env: NodeJS.ProcessEnv,
+  warnings: string[],
+): string[] {
+  const resolved: string[] = [];
+  for (const item of candidate.entries) {
+    const entry = item.value;
+    const treatAsFile = item.kind === 'file' || isExplicitFilePath(entry);
+    if (!treatAsFile) {
+      const text = entry.trim();
+      if (text) resolved.push(text);
+      continue;
+    }
+    const filePath = expandPath(entry, candidate.baseDir, env);
+    try {
+      if (candidate.scope === 'project') {
+        const linfo = lstatSync(filePath);
+        if (linfo.isSymbolicLink() || !linfo.isFile()) {
+          warnings.push(`Perch project prompt path must be a regular non-symlink file inside the project: ${entry}`);
+          continue;
+        }
+        if (!isWithinDir(filePath, candidate.baseDir)) {
+          warnings.push(`Perch project prompt path cannot escape project root: ${entry}`);
+          continue;
+        }
+      }
+      const info = statSync(filePath);
+      if (!info.isFile()) {
+        warnings.push(`Perch prompt path is not a regular file: ${entry}`);
+        continue;
+      }
+      if (info.size > MAX_PROMPT_FILE_BYTES) {
+        warnings.push(`Perch prompt file exceeds 256 KiB limit: ${entry}`);
+        continue;
+      }
+      const body = stripMarkdownFrontmatter(readFileSync(filePath, 'utf8'));
+      if (body) resolved.push(body);
+    } catch {
+      warnings.push(`Perch prompt file not found or unreadable: ${entry}`);
+    }
+  }
+  return resolved;
 }
 
 export function renderRolesTable(roles: Record<string, PerchRoleConfig>): string {
@@ -492,27 +626,12 @@ export function renderRolesTable(roles: Record<string, PerchRoleConfig>): string
   return rows.join('\n');
 }
 
-function readPromptFiles(fileRefs: string[], cwd: string | undefined, env: NodeJS.ProcessEnv): string[] {
-  const bodies: string[] = [];
-  for (const fileRef of fileRefs) {
-    const filePath = expandPath(fileRef, cwd, env);
-    try {
-      const info = statSync(filePath);
-      if (!info.isFile() || info.size > MAX_PROMPT_FILE_BYTES) continue;
-      const body = stripMarkdownFrontmatter(readFileSync(filePath, 'utf8'));
-      if (body) bodies.push(body);
-    } catch {
-      // Ignore unreadable optional prompt files so orchestration still starts cleanly.
-    }
-  }
-  return bodies;
-}
-
 function buildMinimalDefaultPrompt(config: PerchModeConfig, roleTable: string): string {
   const sections: string[] = [
     '# Perch Mode\n'
-    + 'Use the `perch` tool to dispatch and manage worker sessions asynchronously. '
-    + 'Do not block with `perch op=wait(timeout>0)` or shell sleep loops; end your turn after dispatching and react to `[Perch async update]` callbacks.',
+    + 'You are the orchestrator. Code editing, searching, and shell execution tools are restricted here by default — whenever you need to search code, edit files, run commands, or run tests, dispatch a `perch` worker (`perch({ op: "start", role: "...", name: "<short-name>", prompt: "..." })`).\n'
+    + '- **Reuse workers for continuity**: to follow up on the same task, call `perch({ op: "send", id: "<name or id>", text: "..." })`; if that worker has stopped or been closed, Perch resumes its conversation automatically.\n'
+    + '- **Stay non-blocking**: after dispatching, summarize briefly and end your turn to wait for `[Perch async update]` callbacks.',
   ];
   if (roleTable) {
     sections.push('## Worker Roles (`perch op=start` with `role`)\n\n' + roleTable);
@@ -523,14 +642,22 @@ function buildMinimalDefaultPrompt(config: PerchModeConfig, roleTable: string): 
   return sections.join('\n\n');
 }
 
-export function renderPerchSystemPrompt(config: PerchModeConfig, options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): string {
+export function renderPerchSystemPromptWithWarnings(
+  config: PerchModeConfig,
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): { prompt: string; warnings: string[] } {
   const env = options.env ?? process.env;
+  const warnings: string[] = [];
   const roleTable = renderRolesTable(config.roles);
 
-  const overrideParts = [
-    ...readPromptFiles(config.systemPromptFiles, options.cwd, env),
-    ...(config.systemPrompt ? [config.systemPrompt] : []),
-  ];
+  let overrideParts: string[] = [];
+  for (const candidate of config.systemPromptCandidates) {
+    const parts = resolvePromptEntries(candidate, env, warnings);
+    if (parts.length) {
+      overrideParts = parts;
+      break;
+    }
+  }
 
   const sections: string[] = [];
   if (overrideParts.length) {
@@ -544,13 +671,16 @@ export function renderPerchSystemPrompt(config: PerchModeConfig, options: { cwd?
     sections.push(buildMinimalDefaultPrompt(config, roleTable));
   }
 
-  const appendParts = [
-    ...readPromptFiles(config.appendSystemPromptFiles, options.cwd, env),
-    ...(config.appendSystemPrompt ? [config.appendSystemPrompt] : []),
-  ];
-  for (const part of appendParts) {
-    sections.push(part.replaceAll('{{roles}}', roleTable));
+  for (const layer of config.appendPromptLayers) {
+    const parts = resolvePromptEntries(layer, env, warnings);
+    for (const part of parts) {
+      sections.push(part.replaceAll('{{roles}}', roleTable));
+    }
   }
 
-  return sections.join('\n\n');
+  return { prompt: sections.join('\n\n'), warnings };
+}
+
+export function renderPerchSystemPrompt(config: PerchModeConfig, options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): string {
+  return renderPerchSystemPromptWithWarnings(config, options).prompt;
 }

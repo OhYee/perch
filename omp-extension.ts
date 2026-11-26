@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent';
 import { systemLanguage } from './locale.mjs';
 import { translateDiagnostic } from './diagnostics.mjs';
-import { loadPerchConfig, renderPerchSystemPrompt, renderRolesTable, type PerchModeConfig, type PerchRoleConfig } from './perch-config.ts';
+import { loadPerchConfig, renderPerchSystemPromptWithWarnings, renderRolesTable, type PerchModeConfig, type PerchRoleConfig } from './perch-config.ts';
 import { BoardStore, type Command, type ReceiptNotice } from './board/store.ts';
 import { DiscussionFailure, summarizeDiscussion, type DiscussionModelContext } from './board/discussion.ts';
 import { startBoardWeb } from './board/web.ts';
@@ -88,6 +88,19 @@ type TrackedTask = {
   finishedAt?: number;
   error?: string;
   heartbeatCount: number;
+};
+
+type RetiredWorker = {
+  id: string;
+  name?: string;
+  role?: string;
+  provider?: string;
+  mode: 'managed' | 'native';
+  model?: string;
+  cwd?: string;
+  boardItem?: string;
+  boardRoot?: string;
+  retiredAt: number;
 };
 
 type WatcherEntry = {
@@ -239,6 +252,36 @@ function taskLabel(id: string, task: TrackedTask | undefined): string {
   return meta ? `${base} [${meta}]` : base;
 }
 
+const MAX_RETIRED_WORKERS = 50;
+const CLOSED_SESSION_RE = /Session is closed|Session no longer listed|is no longer running|stopped unexpectedly|No session found|Unknown session|local endpoint unavailable|OMP RPC process (?:exited|unavailable)|会话已关闭|会话已不在列表中|已停止|未找到会话|本地端点不可用|OMP RPC 进程|意外停止/i;
+
+function extractNativeResumeId(provider: string | undefined, id: string): string | undefined {
+  const effectiveProvider = provider ?? (id.includes(':') ? id.split(':', 1)[0] : undefined);
+  if (effectiveProvider === 'agy') {
+    const nativeMatch = /^agy:native-[1-9]\d{0,9}\.[0-9a-f]{16}-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(id);
+    if (nativeMatch) return nativeMatch[1];
+    const directMatch = /^agy:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(id);
+    return directMatch?.[1];
+  }
+  if (effectiveProvider === 'omp') {
+    if (id.startsWith('omp:pid-')) return undefined;
+    const match = /^omp:([^\s:]+)$/.exec(id);
+    return match?.[1];
+  }
+  return undefined;
+}
+
+function isResumableWorker(info: { id: string; provider?: string; mode?: 'native' | 'managed' }): boolean {
+  const provider = info.provider ?? (info.id.includes(':') ? info.id.split(':', 1)[0] : undefined);
+  if (!provider || !NATIVE_DEFAULT_PROVIDERS.has(provider)) return false;
+  if (info.mode === 'native') {
+    return !!extractNativeResumeId(provider, info.id);
+  }
+  // Managed resume (`perch resume`) only supports stable omp/agy conversation IDs (not pid- or codex/claude)
+  if (info.id.startsWith('omp:pid-') || info.id.startsWith('agy:pid-')) return false;
+  return info.id.startsWith(`${provider}:`) && info.id.length > provider.length + 1;
+}
+
 function resolveNativeDiscoverMs(config?: PerchModeConfig): number {
   const raw = process.env.PERCH_NATIVE_DISCOVER_MS?.trim();
   if (raw !== undefined && raw !== '') {
@@ -347,6 +390,7 @@ function formatNotification(
   task: TrackedTask | undefined,
   errorText: string | undefined,
   replyText: string | undefined,
+  receiptRecorded = false,
 ): string {
   const lines = [
     '[Perch async update]',
@@ -354,13 +398,16 @@ function formatNotification(
     `Status: ${status}${errorText ? ` — ${errorText}` : ''}`,
   ];
   if (task?.boardItem) {
-    lines.push(`Board item: ${task.boardItem} (receipt recorded; inspect item & acceptance criteria before submitting/approving)`);
+    lines.push(receiptRecorded
+      ? `Board item: ${task.boardItem} (receipt recorded; inspect item & acceptance criteria before submitting/approving)`
+      : `Board item: ${task.boardItem} (receipt not recorded; check current board binding before updating status)`);
   }
   if (replyText) {
     const clipped = clipText(replyText, MAX_NOTIFICATION_CHARS);
     lines.push('Latest assistant reply:', clipped.text);
   }
-  lines.push('Action: inspect this result, update the user with your current status/decision tables, and proceed with the next step (call perch op=close when finished).');
+  const ref = task?.name ?? id;
+  lines.push(`Action: inspect this result, report to the user, and either reuse this worker (perch op=send id="${ref}") to preserve context or close it (perch op=close id="${ref}") when done.`);
   return lines.join('\n');
 }
 
@@ -458,6 +505,8 @@ export default function (pi: ExtensionAPI) {
   const admissions = new Set<Promise<void>>();
   const ownedSessions = new Set<string>();
   const tasks = new Map<string, TrackedTask>();
+  const retiredWorkers = new Map<string, RetiredWorker>();
+  const warnedPromptMessages = new Set<string>();
   const watchers = new Map<string, WatcherEntry>();
   const nativeLaunchChains = new Map<string, Promise<void>>();
   const rightPaneStack: Array<{ id: string; sessionId: string }> = [];
@@ -558,10 +607,17 @@ export default function (pi: ExtensionAPI) {
     const active = anyPi.getActiveTools();
     if (perchModeEnabled) {
       if (!savedToolsBeforePerch) savedToolsBeforePerch = [...active];
+      const basePool = [...new Set([...savedToolsBeforePerch, ...active])];
       const disabled = new Set(config.disableTools);
-      const next = active.filter(tool => !disabled.has(tool));
-      if (!next.includes('perch')) next.push('perch');
-      if (config.board.enabled && !next.includes('board')) next.push('board');
+      let next: string[];
+      if (config.allowTools !== undefined) {
+        const allowed = new Set(config.allowTools);
+        next = basePool.filter(tool => allowed.has(tool) && !disabled.has(tool));
+      } else {
+        next = basePool.filter(tool => !disabled.has(tool));
+      }
+      if (!disabled.has('perch') && !next.includes('perch')) next.push('perch');
+      if (config.board.enabled && !disabled.has('board') && !next.includes('board')) next.push('board');
       if (next.length !== active.length || next.some((t, i) => t !== active[i])) {
         await anyPi.setActiveTools(next);
       }
@@ -688,6 +744,7 @@ export default function (pi: ExtensionAPI) {
     beforeIds: Set<string>,
     discoverMs: number,
     signal?: AbortSignal,
+    options?: { expectedResumeId?: string; allowTaskId?: string },
   ): Promise<string | undefined> {
     const targetCwd = canonicalDir(cwd);
     const deadline = Date.now() + discoverMs;
@@ -696,14 +753,22 @@ export default function (pi: ExtensionAPI) {
       const rows = await listProviderSessions(provider, signal);
       const candidates = rows.filter(row => {
         const id = typeof row?.id === 'string' ? row.id : '';
-        return id && !beforeIds.has(id) && !tasks.has(id) && row.kind === 'session' && row.send === true;
+        return id && !beforeIds.has(id) && (!tasks.has(id) || id === options?.allowTaskId) && row.kind === 'session' && row.send === true;
       });
-      const exact = candidates.find(row => {
-        const rowCwd = typeof row.cwd === 'string' ? canonicalDir(row.cwd) : null;
-        return rowCwd && targetCwd && rowCwd === targetCwd;
-      });
-      if (exact && typeof exact.id === 'string') return exact.id;
-      if (candidates.length === 1 && typeof candidates[0].id === 'string') return candidates[0].id;
+      if (options?.expectedResumeId) {
+        const byResume = candidates.find(row => {
+          const id = typeof row.id === 'string' ? row.id : '';
+          return id === `${provider}:${options.expectedResumeId}` || extractNativeResumeId(provider, id) === options.expectedResumeId;
+        });
+        if (byResume && typeof byResume.id === 'string') return byResume.id;
+      } else {
+        const exact = candidates.find(row => {
+          const rowCwd = typeof row.cwd === 'string' ? canonicalDir(row.cwd) : null;
+          return rowCwd && targetCwd && rowCwd === targetCwd;
+        });
+        if (exact && typeof exact.id === 'string') return exact.id;
+        if (candidates.length === 1 && typeof candidates[0].id === 'string') return candidates[0].id;
+      }
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       await delay(Math.min(250, remaining), undefined, { signal }).catch(() => {});
@@ -788,8 +853,9 @@ export default function (pi: ExtensionAPI) {
     task: TrackedTask | undefined,
     errorText: string | undefined,
     replyText: string | undefined,
+    receiptRecorded = false,
   ) {
-    const content = formatNotification(id, status, task, errorText, replyText);
+    const content = formatNotification(id, status, task, errorText, replyText, receiptRecorded);
     pushAgentEvent('perch-worker-event', content, {
       id,
       status,
@@ -869,14 +935,15 @@ export default function (pi: ExtensionAPI) {
           finishedAt: Date.now(),
           error: errorText,
         });
+        let receiptRecorded = false;
         if (task.boardRoot && task.boardItem) {
           const receiptBody = replyText || (errorText ? `Worker ${status}: ${errorText}` : `Worker ${status}.`);
           try {
-            recordPerchWorkerReceipt(task.boardRoot, id, `perch:${task.finishSeq}`, receiptBody);
+            receiptRecorded = recordPerchWorkerReceipt(task.boardRoot, id, `perch:${task.finishSeq}`, receiptBody);
           } catch {}
         }
         updatePerchUi();
-        deliverAsyncNotification(id, status, task, errorText, replyText);
+        deliverAsyncNotification(id, status, task, errorText, replyText, receiptRecorded);
       } catch (error) {
         if (watchers.get(id)?.generation === generation) {
           if (entry.timer) clearInterval(entry.timer);
@@ -891,23 +958,298 @@ export default function (pi: ExtensionAPI) {
           finishedAt: Date.now(),
           error: message,
         });
+        let receiptRecorded = false;
         if (task.boardRoot && task.boardItem) {
           try {
-            recordPerchWorkerReceipt(task.boardRoot, id, `perch:${task.finishSeq}`, `Worker failed: ${message}`);
+            receiptRecorded = recordPerchWorkerReceipt(task.boardRoot, id, `perch:${task.finishSeq}`, `Worker failed: ${message}`);
           } catch {}
         }
         updatePerchUi();
-        deliverAsyncNotification(id, 'failed', task, message, undefined);
+        deliverAsyncNotification(id, 'failed', task, message, undefined, receiptRecorded);
       }
     })();
   }
 
+  function retireTask(task: TrackedTask) {
+    if (task.name) {
+      for (const [oldId, old] of retiredWorkers) {
+        if (old.name === task.name && oldId !== task.id) retiredWorkers.delete(oldId);
+      }
+    }
+    const inferredProvider = task.provider ?? (task.id.includes(':') ? task.id.split(':', 1)[0] : undefined);
+    const inferredMode: 'managed' | 'native' = task.mode ?? (task.pane || task.id.startsWith('agy:native-') ? 'native' : 'managed');
+    retiredWorkers.delete(task.id);
+    retiredWorkers.set(task.id, {
+      id: task.id,
+      name: task.name,
+      role: task.role,
+      provider: inferredProvider,
+      mode: inferredMode,
+      model: task.model,
+      cwd: task.cwd,
+      boardItem: task.boardItem,
+      boardRoot: task.boardRoot,
+      retiredAt: Date.now(),
+    });
+    while (retiredWorkers.size > MAX_RETIRED_WORKERS) {
+      const oldest = retiredWorkers.keys().next().value;
+      if (oldest === undefined) break;
+      retiredWorkers.delete(oldest);
+    }
+  }
+
+  function evictRetiredByName(name: string | undefined) {
+    if (!name) return;
+    for (const [oldId, old] of retiredWorkers) {
+      if (old.name === name) retiredWorkers.delete(oldId);
+    }
+  }
+
+  function rebindBoardForRevivedWorker(boardRoot: string | undefined, oldWorkerId: string, newWorkerId: string): string | undefined {
+    if (!boardRoot) return undefined;
+    try {
+      return withBoard(boardRoot, store => store.rebindWorker(oldWorkerId, newWorkerId), false);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function resolveWorkerTarget(idOrName: string): { id: string; task?: TrackedTask; retired?: RetiredWorker } {
+    const directTask = tasks.get(idOrName);
+    if (directTask) return { id: directTask.id, task: directTask };
+    let matchedTask: TrackedTask | undefined;
+    for (const task of tasks.values()) {
+      if (task.name === idOrName) matchedTask = task;
+    }
+    if (matchedTask) return { id: matchedTask.id, task: matchedTask };
+
+    const directRetired = retiredWorkers.get(idOrName);
+    if (directRetired) return { id: directRetired.id, retired: directRetired };
+    let matchedRetired: RetiredWorker | undefined;
+    for (const retired of retiredWorkers.values()) {
+      if (retired.name === idOrName) matchedRetired = retired;
+    }
+    if (matchedRetired) return { id: matchedRetired.id, retired: matchedRetired };
+
+    return { id: idOrName };
+  }
+
+  async function reviveWorkerAndDeliver(
+    ref: {
+      id: string;
+      name?: string;
+      role?: string;
+      provider?: string;
+      mode?: 'native' | 'managed';
+      model?: string;
+      cwd?: string;
+      boardItem?: string;
+      boardRoot?: string;
+    },
+    message: string,
+    ctx: ExtensionContext,
+    config: PerchModeConfig,
+    options: { signal?: AbortSignal; notify: boolean; heartbeatMs: number; name?: string },
+  ): Promise<Record<string, unknown>> {
+    const provider = ref.provider ?? (ref.id.includes(':') ? ref.id.split(':', 1)[0] : undefined);
+    const effectiveName = options.name ?? ref.name;
+
+    if (ref.mode === 'native') {
+      const resumeId = extractNativeResumeId(provider, ref.id);
+      if (!resumeId || !provider || !NATIVE_DEFAULT_PROVIDERS.has(provider)) {
+        throw new Error(`Cannot auto-resume native ${provider ?? 'worker'} session ${ref.id}: resumable conversation ID is unavailable. Start a new worker with op=start.`);
+      }
+      const cwd = ref.cwd || ctx.cwd;
+      const agyInlinePrompt = provider === 'agy'
+        ? `请阅读并严格执行该文件中的完整指令:${stageAgyNativePrompt(uid, message)}`
+        : undefined;
+      const discoverMs = resolveNativeDiscoverMs(config);
+
+      const revived = await withNativeLaunchLock(provider, async () => {
+        // Re-check inside lock in case a concurrent send already revived this worker
+        const existingLive = [...tasks.values()].find(t => {
+          if (t.id === ref.id) return false;
+          if (t.mode !== 'native' || t.provider !== provider) return false;
+          return extractNativeResumeId(provider, t.id) === resumeId;
+        });
+        if (existingLive) {
+          return { id: existingLive.id, started: { pane: existingLive.pane }, promptAlreadyDelivered: false, alreadyRevived: true };
+        }
+
+        // Clean up any dead/stale pane from a crashed live task before finding a stack target
+        const staleTask = tasks.get(ref.id);
+        if (staleTask?.pane) {
+          await closePaneRef(staleTask.pane);
+          removePaneFromStack(ref.id);
+        }
+
+        const beforeRows = await listProviderSessions(provider, options.signal);
+        const beforeIds = new Set(
+          beforeRows
+            .filter(r => r?.kind === 'session' && r?.send === true && typeof r?.id === 'string')
+            .map(r => r.id as string),
+        );
+        const nativeArgs = ['start', provider];
+        if (agyInlinePrompt !== undefined) nativeArgs.push(agyInlinePrompt);
+        nativeArgs.push('--native', '--pane', 'right', '--resume', resumeId, '--cwd', cwd, '--json');
+        if (config.layout === 'stack') {
+          const stackTarget = await findLiveRightStackTarget();
+          if (stackTarget) {
+            nativeArgs.push('--split', 'down', '--target', stackTarget);
+          }
+        }
+        if (ref.model) nativeArgs.push('--model', ref.model);
+        const childEnv = provider === 'omp'
+          ? { ...process.env, PERCH_MANAGED_WORKER: '1' }
+          : process.env;
+        const startedResult = await runPerchCli(nativeArgs, { signal: options.signal, timeoutMs: 45000, env: childEnv });
+        if (startedResult.code !== 0) {
+          throw new Error(cliErrorMessage(startedResult, `Failed to auto-resume native ${provider} worker ${ref.id}`));
+        }
+        const started = parseJson(startedResult.stdout) as { provider?: string; mode?: string; pane?: unknown };
+        const paneRef = normalizePaneRef(started.pane);
+
+        let discoveredId: string | undefined;
+        try {
+          discoveredId = await waitForNewNativeSession(provider, cwd, beforeIds, discoverMs, options.signal, {
+            expectedResumeId: resumeId,
+            allowTaskId: ref.id,
+          });
+        } catch (error) {
+          await closePaneRef(paneRef);
+          throw error;
+        }
+        if (!discoveredId) {
+          await closePaneRef(paneRef);
+          throw new Error(`Auto-resumed native ${provider} pane opened, but no controllable session registered in time (${Math.round(discoverMs / 1000)}s). Orphan pane closed.`);
+        }
+
+        // Only replace old task/retired entries AFTER discovery succeeds
+        cancelWatcher(ref.id);
+        if (discoveredId !== ref.id) tasks.delete(ref.id);
+        retiredWorkers.delete(ref.id);
+        evictRetiredByName(effectiveName);
+        removePaneFromStack(ref.id);
+
+        if (paneRef?.backend === 'tern') {
+          rightPaneStack.push({ id: paneRef.id, sessionId: discoveredId });
+        }
+        const reboundItem = ref.boardItem
+          ? rebindBoardForRevivedWorker(ref.boardRoot, ref.id, discoveredId)
+          : undefined;
+        ensureTask(discoveredId, {
+          ...(effectiveName ? { name: effectiveName } : {}),
+          ...(ref.role ? { role: ref.role } : {}),
+          provider,
+          mode: 'native',
+          ...(ref.model ? { model: ref.model } : {}),
+          cwd,
+          ...(paneRef ? { pane: paneRef } : {}),
+          boardItem: reboundItem,
+          boardRoot: reboundItem ? ref.boardRoot : undefined,
+          state: agyInlinePrompt !== undefined ? 'running' : 'idle',
+          unhandled: false,
+          ...(agyInlinePrompt !== undefined ? { startedAt: Date.now(), finishedAt: undefined } : {}),
+          error: undefined,
+          heartbeatCount: 0,
+        });
+        updatePerchUi(ctx);
+        return { id: discoveredId, started, reboundItem, promptAlreadyDelivered: agyInlinePrompt !== undefined, alreadyRevived: false };
+      });
+
+      if (revived.promptAlreadyDelivered) {
+        if (options.notify) startWatcher(revived.id, options.heartbeatMs);
+        return {
+          id: revived.id,
+          ...(revived.id !== ref.id ? { previousId: ref.id } : {}),
+          ...(effectiveName ? { name: effectiveName } : {}),
+          ...(ref.role ? { role: ref.role } : {}),
+          ...(revived.reboundItem ? { boardItem: revived.reboundItem } : {}),
+          provider,
+          mode: 'native',
+          pane: revived.started.pane,
+          autoResumed: true,
+          accepted: true,
+          notify: options.notify,
+        };
+      }
+
+      const delivered = await deliverPrompt(revived.id, message, {
+        signal: options.signal,
+        notify: options.notify,
+        heartbeatMs: options.heartbeatMs,
+        name: effectiveName,
+      });
+      return {
+        id: revived.id,
+        ...(revived.id !== ref.id ? { previousId: ref.id } : {}),
+        ...(effectiveName ? { name: effectiveName } : {}),
+        ...(ref.role ? { role: ref.role } : {}),
+        ...(revived.reboundItem ? { boardItem: revived.reboundItem } : {}),
+        provider,
+        mode: 'native',
+        pane: revived.started.pane,
+        autoResumed: true,
+        ...delivered,
+      };
+    }
+
+    // Managed worker auto-resume via `perch resume <id> --json`
+    const resumedResult = await runPerchCli(['resume', ref.id, '--json'], { signal: options.signal, timeoutMs: 45000 });
+    if (resumedResult.code !== 0) {
+      throw new Error(cliErrorMessage(resumedResult, `Failed to auto-resume worker ${ref.id}`));
+    }
+    const resumed = parseJson(resumedResult.stdout) as { id?: string; provider?: string } | undefined;
+    const targetId = resumed?.id || ref.id;
+    retiredWorkers.delete(ref.id);
+    retiredWorkers.delete(targetId);
+    evictRetiredByName(effectiveName);
+    ownedSessions.add(targetId);
+    const reboundItem = ref.boardItem
+      ? rebindBoardForRevivedWorker(ref.boardRoot, ref.id, targetId)
+      : undefined;
+    ensureTask(targetId, {
+      ...(effectiveName ? { name: effectiveName } : {}),
+      ...(ref.role ? { role: ref.role } : {}),
+      provider: resumed?.provider ?? provider,
+      mode: 'managed',
+      ...(ref.model ? { model: ref.model } : {}),
+      ...(ref.cwd ? { cwd: ref.cwd } : {}),
+      boardItem: reboundItem,
+      boardRoot: reboundItem ? ref.boardRoot : undefined,
+      state: 'idle',
+      unhandled: false,
+      error: undefined,
+    });
+    updatePerchUi(ctx);
+    const delivered = await deliverPrompt(targetId, message, {
+      signal: options.signal,
+      notify: options.notify,
+      heartbeatMs: options.heartbeatMs,
+      name: effectiveName,
+    });
+    return {
+      id: targetId,
+      ...(targetId !== ref.id ? { previousId: ref.id } : {}),
+      ...(effectiveName ? { name: effectiveName } : {}),
+      ...(ref.role ? { role: ref.role } : {}),
+      ...(reboundItem ? { boardItem: reboundItem } : {}),
+      mode: 'managed',
+      autoResumed: true,
+      ...delivered,
+    };
+  }
+
   async function closeTrackedWorker(id: string, signal?: AbortSignal): Promise<{ id: string; closed: boolean; paneClosed?: boolean }> {
     const task = tasks.get(id);
+    if (!task && retiredWorkers.has(id)) {
+      return { id, closed: true };
+    }
     cancelWatcher(id);
     ownedSessions.delete(id);
     tasks.delete(id);
     removePaneFromStack(id);
+    if (task) retireTask(task);
     if (task?.boardRoot) {
       try {
         withBoard(task.boardRoot, store => store.releaseWorker(id, 'Perch worker closed.'), false);
@@ -1178,7 +1520,7 @@ export default function (pi: ExtensionAPI) {
       approval: 'exec',
       loadMode: 'essential',
       strict: true,
-      description: 'Manage local agent sessions (agy, omp, codex, claude) through Perch. Both native and managed starts run in full-access / yolo mode by default. On op=start you can pass `role` (from config.yml perch.roles) to automatically fill provider, model, native pane, worker identity prefix, and constraints; optionally pass `item` + `boardRole` (execute|review) to bind a session board item. In interactive TUI mode, op=start defaults to native=true with stacked right-side panes for omp and agy; pass native=false for headless managed sessions. Do NOT block with op=wait(timeout>0) or bash sleep loops — rely on notify=true async updates, op=list(owned=true), and op=wait(timeout=0). If op=send reports busy, the message was rejected (NOT queued); wait until idle before resending.',
+      description: 'Delegate work to Perch worker agents (agy, omp, codex, claude). Common ops:\n1) start: pass role (from perch.roles) or provider, short name, and prompt (optional item+boardRole for session board).\n2) send: reuse an existing worker by short name OR session id — if the worker stopped/closed, send automatically resumes its conversation and delivers text!\n3) list: inspect owned workers (including recently stopped resumable workers).\n4) history: read a worker\'s replies by name or id.\n5) close: close a finished worker by name or id.\nAlways rely on automatic [Perch async update] notifications instead of waiting/polling loops.',
       parameters: type({
         op: "'list' | 'start' | 'send' | 'wait' | 'history' | 'resume' | 'close'",
         'role?': 'string > 0',
@@ -1223,9 +1565,10 @@ export default function (pi: ExtensionAPI) {
           const liveRows = (parseJson(result.stdout) ?? []) as Array<Record<string, unknown>>;
           const liveById = new Map(liveRows.filter(r => typeof r?.id === 'string').map(r => [r.id as string, r]));
           const now = Date.now();
-          if (params.owned) {
+          const showOwned = params.owned ?? perchModeEnabled;
+          if (showOwned) {
             const ownedIds = new Set([...ownedSessions, ...tasks.keys()]);
-            const rows = [];
+            const rows: Array<Record<string, unknown>> = [];
             for (const id of ownedIds) {
               const task = tasks.get(id);
               const live = liveById.get(id);
@@ -1234,6 +1577,7 @@ export default function (pi: ExtensionAPI) {
               const elapsedSeconds = task?.startedAt !== undefined
                 ? Math.max(0, Math.floor(((task.state === 'running' ? now : (task.finishedAt ?? now)) - task.startedAt) / 1000))
                 : undefined;
+              const liveStatus = typeof live?.status === 'string' ? live.status : 'stopped';
               rows.push({
                 id,
                 ...(task?.name ? { name: task.name } : {}),
@@ -1243,12 +1587,32 @@ export default function (pi: ExtensionAPI) {
                 ...(task?.mode ? { mode: task.mode } : {}),
                 ...(task?.pane ? { pane: task.pane } : {}),
                 ...(task?.boardItem ? { boardItem: task.boardItem } : {}),
-                state: task?.state ?? (typeof live?.status === 'string' ? live.status : 'unknown'),
+                state: task?.state ?? liveStatus,
                 unhandled: task?.unhandled ?? false,
-                liveStatus: typeof live?.status === 'string' ? live.status : 'stopped',
+                liveStatus,
+                ...(liveStatus === 'stopped' ? { resumable: isResumableWorker({ id, provider, mode: task?.mode }) } : {}),
                 ...(elapsedSeconds !== undefined ? { elapsedSeconds } : {}),
                 ...(task?.error ? { error: task.error } : {}),
                 cwd: task?.cwd ?? (typeof live?.cwd === 'string' ? live.cwd : null),
+              });
+            }
+            for (const retired of retiredWorkers.values()) {
+              if (ownedIds.has(retired.id)) continue;
+              const provider = retired.provider ?? (retired.id.includes(':') ? retired.id.split(':', 1)[0] : undefined);
+              if (params.provider && provider !== params.provider) continue;
+              rows.push({
+                id: retired.id,
+                ...(retired.name ? { name: retired.name } : {}),
+                ...(retired.role ? { role: retired.role } : {}),
+                ...(provider ? { provider } : {}),
+                ...(retired.model ? { model: retired.model } : {}),
+                ...(retired.mode ? { mode: retired.mode } : {}),
+                ...(retired.boardItem ? { boardItem: retired.boardItem } : {}),
+                state: 'stopped',
+                unhandled: false,
+                liveStatus: 'stopped',
+                resumable: isResumableWorker(retired),
+                cwd: retired.cwd ?? null,
               });
             }
             return emit(rows);
@@ -1356,7 +1720,11 @@ export default function (pi: ExtensionAPI) {
               const discoverMs = resolveNativeDiscoverMs(config);
               const nativeResult = await withNativeLaunchLock(provider, async () => {
                 const beforeRows = await listProviderSessions(provider, signal);
-                const beforeIds = new Set(beforeRows.map(r => r?.id).filter((v): v is string => typeof v === 'string'));
+                const beforeIds = new Set(
+                  beforeRows
+                    .filter(r => r?.kind === 'session' && r?.send === true && typeof r?.id === 'string')
+                    .map(r => r.id as string),
+                );
                 const nativeArgs = ['start', provider];
                 if (agyInlineLaunchPrompt !== undefined) nativeArgs.push(agyInlineLaunchPrompt);
                 nativeArgs.push('--native', '--pane', pane, '--cwd', cwd, '--json');
@@ -1383,12 +1751,19 @@ export default function (pi: ExtensionAPI) {
                 if (provider === 'agy' && agyInlineLaunchPrompt === undefined) {
                   return { fallback: false as const, id: undefined, started, paneRef, promptAlreadyDelivered: false };
                 }
-                const discoveredId = await waitForNewNativeSession(provider, cwd, beforeIds, discoverMs, signal);
+                let discoveredId: string | undefined;
+                try {
+                  discoveredId = await waitForNewNativeSession(provider, cwd, beforeIds, discoverMs, signal);
+                } catch (error) {
+                  await closePaneRef(paneRef);
+                  throw error;
+                }
                 if (!discoveredId) {
                   // Clean up orphan pane on discovery timeout so it does not litter the terminal.
                   await closePaneRef(paneRef);
                   throw new Error(`Native ${provider} pane opened, but no controllable session registered in time (${Math.round(discoverMs / 1000)}s). Orphan pane closed. Ensure perch integration install ${provider} is active, or retry with native=false.`);
                 }
+                evictRetiredByName(taskName);
                 if (paneRef?.backend === 'tern') {
                   rightPaneStack.push({ id: paneRef.id, sessionId: discoveredId });
                 }
@@ -1490,6 +1865,7 @@ export default function (pi: ExtensionAPI) {
             const started = parseJson(startedResult.stdout) as { id?: string; provider?: string; pane?: unknown };
             if (!started?.id) throw new Error('perch start did not return a session ID');
             const boundItem = commitBoardReservation(started.id);
+            evictRetiredByName(taskName);
             ownedSessions.add(started.id);
             ensureTask(started.id, {
               ...(taskName ? { name: taskName } : {}),
@@ -1533,33 +1909,73 @@ export default function (pi: ExtensionAPI) {
             throw error;
           }
         }
-        if (!params.id) throw new Error(`perch ${params.op} requires id`);
+        const rawTarget = params.id ?? params.name;
+        if (!rawTarget) throw new Error(`perch ${params.op} requires id or name`);
+        const resolved = resolveWorkerTarget(rawTarget);
+        const targetId = resolved.id;
+
         if (params.op === 'send') {
           const message = params.text ?? params.prompt;
           if (!message || !message.trim()) throw new Error('perch send requires non-empty text');
           const heartbeatMs = resolveHeartbeatMs(params.heartbeatSeconds, config, perchModeEnabled);
           const taskName = sanitizeName(params.name);
-          const delivered = await deliverPrompt(params.id, message, {
+          const sendOpts = {
             signal,
             notify: params.notify !== false,
             heartbeatMs,
-            name: taskName,
-          });
-          return emit({ id: params.id, ...delivered });
+            name: taskName ?? resolved.task?.name ?? resolved.retired?.name,
+          };
+          if (resolved.retired && !resolved.task) {
+            return emit(await reviveWorkerAndDeliver(resolved.retired, message, ctx, config, sendOpts));
+          }
+          try {
+            const delivered = await deliverPrompt(targetId, message, sendOpts);
+            return emit({
+              id: targetId,
+              ...(sendOpts.name ? { name: sendOpts.name } : {}),
+              ...delivered,
+            });
+          } catch (error) {
+            const errMsg = error instanceof Error ? error.message : String(error);
+            const fallbackRef = resolved.task ?? resolved.retired ?? {
+              id: targetId,
+              provider: targetId.includes(':') ? targetId.split(':', 1)[0] : undefined,
+              mode: (targetId.startsWith('agy:native-') ? 'native' : 'managed') as 'native' | 'managed',
+            };
+            if (CLOSED_SESSION_RE.test(errMsg) && isResumableWorker(fallbackRef)) {
+              return emit(await reviveWorkerAndDeliver(fallbackRef, message, ctx, config, sendOpts));
+            }
+            throw error;
+          }
         }
         if (params.op === 'wait') {
-          const args = ['wait', params.id, '--json'];
-          if (params.timeout !== undefined) {
-            if (!Number.isSafeInteger(params.timeout) || params.timeout < 0 || params.timeout > 86400) {
+          const forceNonBlocking = perchModeEnabled && (params.timeout === undefined || params.timeout > 0);
+          const effectiveTimeout = forceNonBlocking ? 0 : params.timeout;
+          const args = ['wait', targetId, '--json'];
+          if (effectiveTimeout !== undefined) {
+            if (!Number.isSafeInteger(effectiveTimeout) || effectiveTimeout < 0 || effectiveTimeout > 86400) {
               throw new Error('timeout must be an integer between 0 and 86400 seconds');
             }
-            args.push('--timeout', String(params.timeout));
+            args.push('--timeout', String(effectiveTimeout));
           }
           const result = await runPerchCli(args, { signal });
           let parsed: { status?: string; error?: string } | undefined;
           try { parsed = parseJson(result.stdout) as { status?: string; error?: string } | undefined; } catch {}
           if (parsed && typeof parsed === 'object') {
-            const task = tasks.get(params.id);
+            if (forceNonBlocking && parsed.status === 'timeout') {
+              const hasWatcher = watchers.has(targetId);
+              return emit({
+                id: targetId,
+                ...(resolved.task?.name ? { name: resolved.task.name } : {}),
+                status: 'running',
+                nonBlocking: true,
+                watcherAttached: hasWatcher,
+                note: hasWatcher
+                  ? 'Worker is still running. End your turn and wait for the automatic [Perch async update].'
+                  : 'Worker is still running (no async watcher attached; check later with perch op=list or op=history).',
+              });
+            }
+            const task = tasks.get(targetId);
             if (task && typeof parsed.status === 'string' && ['completed', 'failed', 'needs_input', 'interrupted'].includes(parsed.status)) {
               task.state = parsed.status as TaskState;
               task.finishedAt = Date.now();
@@ -1571,7 +1987,7 @@ export default function (pi: ExtensionAPI) {
           throw new Error(cliErrorMessage(result, 'perch wait failed'));
         }
         if (params.op === 'history') {
-          const args = ['history', params.id, '--json'];
+          const args = ['history', targetId, '--json'];
           if (params.all) args.push('--all');
           else if (params.limit !== undefined) {
             if (!Number.isSafeInteger(params.limit) || params.limit <= 0) throw new Error('limit must be a positive integer');
@@ -1579,24 +1995,54 @@ export default function (pi: ExtensionAPI) {
           }
           const result = await runPerchCli(args, { signal, timeoutMs: 15000 });
           if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch history failed'));
-          const task = tasks.get(params.id);
+          const task = tasks.get(targetId);
           if (task && task.state !== 'running') task.unhandled = false;
           updatePerchUi(ctx);
           return emit(parseJson(result.stdout) ?? []);
         }
         if (params.op === 'resume') {
-          const result = await runPerchCli(['resume', params.id, '--json'], { signal, timeoutMs: 45000 });
+          const ref = resolved.retired ?? resolved.task;
+          if (ref?.mode === 'native') {
+            const msg = params.text ?? params.prompt;
+            if (msg && msg.trim()) {
+              const heartbeatMs = resolveHeartbeatMs(params.heartbeatSeconds, config, perchModeEnabled);
+              return emit(await reviveWorkerAndDeliver(ref, msg, ctx, config, {
+                signal,
+                notify: params.notify !== false,
+                heartbeatMs,
+                name: sanitizeName(params.name) ?? ref.name,
+              }));
+            }
+            throw new Error(`To resume native ${ref.provider ?? 'worker'} session ${targetId}, call perch op=send id="${ref.name ?? targetId}" with your next message — it will automatically reopen and resume the conversation.`);
+          }
+          const result = await runPerchCli(['resume', targetId, '--json'], { signal, timeoutMs: 45000 });
           if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch resume failed'));
           const resumed = parseJson(result.stdout) as { id?: string; provider?: string };
           if (resumed?.id) {
+            retiredWorkers.delete(targetId);
+            retiredWorkers.delete(resumed.id);
+            evictRetiredByName(ref?.name);
             ownedSessions.add(resumed.id);
-            ensureTask(resumed.id, { provider: resumed.provider ?? resumed.id.split(':', 1)[0], mode: 'managed', state: 'idle' });
+            const reboundItem = ref?.boardItem
+              ? rebindBoardForRevivedWorker(ref.boardRoot, targetId, resumed.id)
+              : undefined;
+            ensureTask(resumed.id, {
+              ...(ref?.name ? { name: ref.name } : {}),
+              ...(ref?.role ? { role: ref.role } : {}),
+              provider: resumed.provider ?? resumed.id.split(':', 1)[0],
+              mode: 'managed',
+              ...(ref?.model ? { model: ref.model } : {}),
+              ...(ref?.cwd ? { cwd: ref.cwd } : {}),
+              boardItem: reboundItem,
+              boardRoot: reboundItem ? ref?.boardRoot : undefined,
+              state: 'idle',
+            });
             updatePerchUi(ctx);
           }
           return emit(resumed);
         }
         if (params.op === 'close') {
-          return emit(await closeTrackedWorker(params.id, signal));
+          return emit(await closeTrackedWorker(targetId, signal));
         }
         throw new Error(`Unsupported perch operation: ${params.op}`);
       },
@@ -1913,7 +2359,14 @@ export default function (pi: ExtensionAPI) {
     let nextSystemPrompt: string[] | undefined;
     if (perchModeEnabled) {
       const base = Array.isArray(ev.systemPrompt) ? ev.systemPrompt : typeof ev.systemPrompt === 'string' ? [ev.systemPrompt] : [];
-      nextSystemPrompt = [...base, renderPerchSystemPrompt(config, { cwd: ctx.cwd })];
+      const rendered = renderPerchSystemPromptWithWarnings(config, { cwd: ctx.cwd });
+      for (const warning of rendered.warnings) {
+        if (!warnedPromptMessages.has(warning)) {
+          warnedPromptMessages.add(warning);
+          ctx.ui?.notify?.(warning, 'warning');
+        }
+      }
+      nextSystemPrompt = [...base, rendered.prompt];
     }
 
     let boardMessage: { customType: string; content: string; display: boolean; attribution: 'agent' } | undefined;
@@ -2082,6 +2535,8 @@ export default function (pi: ExtensionAPI) {
       if (mainRoot) previousRoot = mainRoot;
       mainRoot = undefined;
       receiptContext = undefined;
+      retiredWorkers.clear();
+      warnedPromptMessages.clear();
       closeWeb();
       const ui = (ctx as unknown as { ui?: { setStatus?: (k: string, v: string | undefined) => void } }).ui;
       ui?.setStatus?.('board', undefined);
@@ -2127,6 +2582,8 @@ export default function (pi: ExtensionAPI) {
     const toClose = [...ownedSessions];
     ownedSessions.clear();
     tasks.clear();
+    retiredWorkers.clear();
+    warnedPromptMessages.clear();
     rightPaneStack.length = 0;
     if (toClose.length) {
       await Promise.allSettled(toClose.map(id => runPerchCli(['close', id, '--json'], { timeoutMs: 3000 }).catch(() => {})));

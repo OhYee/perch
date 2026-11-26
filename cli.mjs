@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { parseArgs, promisify } from 'node:util';
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, lstat, mkdir, open, realpath, stat } from 'node:fs/promises';
+import { access, lstat, mkdir, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -158,16 +159,97 @@ function nativeYoloArgs(provider, providerArgs) {
   return [];
 }
 
+async function ensureAgyTrustedWorkspace(cwd) {
+  try {
+    const realCwd = await realpath(cwd).catch(() => resolve(cwd));
+    const settingsDir = join(homedir(), '.gemini', 'antigravity-cli');
+    const settingsPath = join(settingsDir, 'settings.json');
+    const lockPath = join(settingsDir, '.settings.lock');
+    await mkdir(settingsDir, { recursive: true, mode: 0o700 });
+
+    let locked = false;
+    for (let attempt = 0; attempt < 25; attempt++) {
+      try {
+        const lh = await open(lockPath, 'wx', 0o600);
+        await lh.close();
+        locked = true;
+        break;
+      } catch (error) {
+        if (error?.code !== 'EEXIST') return;
+        try {
+          const info = await lstat(lockPath);
+          if (Date.now() - info.mtimeMs > 10000) await unlink(lockPath).catch(() => {});
+        } catch {}
+        await new Promise(r => setTimeout(r, 20));
+      }
+    }
+    if (!locked) return;
+
+    try {
+      let data = {};
+      try {
+        const handle = await open(settingsPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const info = await handle.stat();
+          if (!info.isFile()) return;
+          const parsed = JSON.parse(await handle.readFile('utf8'));
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+          data = parsed;
+        } finally {
+          await handle.close();
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') return;
+      }
+      if (data.trustedWorkspaces === undefined) data.trustedWorkspaces = [];
+      if (!Array.isArray(data.trustedWorkspaces)) return;
+      if (data.trustedWorkspaces.includes(realCwd)) return;
+      data.trustedWorkspaces.push(realCwd);
+
+      const tmpPath = join(settingsDir, `.settings.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+      try {
+        const handle = await open(tmpPath, 'wx', 0o600);
+        try {
+          await handle.writeFile(`${JSON.stringify(data, null, 2)}\n`, 'utf8');
+        } finally {
+          await handle.close();
+        }
+        await rename(tmpPath, settingsPath);
+      } catch (error) {
+        await unlink(tmpPath).catch(() => {});
+        throw error;
+      }
+    } finally {
+      await unlink(lockPath).catch(() => {});
+    }
+  } catch {
+    // Best-effort only: never block launching agy if settings.json is unavailable.
+  }
+}
+
+function buildNativeCommand(provider, nativeExecutable, values, initialPrompt, providerArgs = []) {
+  const command = ['/usr/bin/env', ...nativeEnvironment(provider), nativeExecutable, ...nativeYoloArgs(provider, providerArgs)];
+  if (values.model !== undefined) command.push('--model', values.model);
+  if (values.resume !== undefined) {
+    if (provider === 'agy') command.push(`--resume=${values.resume}`);
+    else command.push('--resume', values.resume);
+  }
+  command.push(...providerArgs);
+  if (initialPrompt !== undefined) {
+    // agy 的交互提示词是一个选项值，不是任意位置参数或独立开关。
+    if (provider === 'agy') command.push(`--prompt-interactive=${initialPrompt}`);
+    else command.push('--', initialPrompt);
+  }
+  return command;
+}
+
 async function launchPane(values, session, provider, cwd, nativeExecutable, initialPrompt, providerArgs = []) {
+  if (nativeExecutable && provider === 'agy') {
+    await ensureAgyTrustedWorkspace(cwd);
+  }
   if (nativeExecutable && values.pane === 'right' && values.target !== undefined) {
     const direction = values.split ?? 'down';
-    const command = ['/usr/bin/env', ...nativeEnvironment(provider), nativeExecutable, ...nativeYoloArgs(provider, providerArgs)];
-    if (values.model !== undefined) command.push('--model', values.model);
-    command.push(...providerArgs);
-    if (initialPrompt !== undefined) {
-      if (provider === 'agy') command.push(`--prompt-interactive=${initialPrompt}`);
-      else command.push('--', initialPrompt);
-    }
+    const command = buildNativeCommand(provider, nativeExecutable, values, initialPrompt, providerArgs);
     let stdout;
     try {
       ({ stdout } = await promisify(execFile)('tern', ['split', values.target, direction, '--cwd', cwd, '--json', '--', ...command], { maxBuffer: 1024 * 1024 }));
@@ -184,15 +266,7 @@ async function launchPane(values, session, provider, cwd, nativeExecutable, init
   const args = ['--mode', 'right'];
   if (values.pane !== 'right') args.push('--backend', values.pane, '--session', values.workspace, '--tab', values.tab);
   if (nativeExecutable) {
-    args.push('--cwd', cwd, '--', '/usr/bin/env', ...nativeEnvironment(provider), nativeExecutable);
-    args.push(...nativeYoloArgs(provider, providerArgs));
-    if (values.model !== undefined) args.push('--model', values.model);
-    args.push(...providerArgs);
-    if (initialPrompt !== undefined) {
-      // agy 的交互提示词是一个选项值，不是任意位置参数或独立开关。
-      if (provider === 'agy') args.push(`--prompt-interactive=${initialPrompt}`);
-      else args.push('--', initialPrompt);
-    }
+    args.push('--cwd', cwd, '--', ...buildNativeCommand(provider, nativeExecutable, values, initialPrompt, providerArgs));
   } else {
     args.push('--wait-output', '[as-ready]', '--');
     const environment = provider === 'codex'
@@ -379,7 +453,7 @@ async function run([command, ...args]) {
   else if (command === 'history') Object.assign(options, { limit: opt('string'), all: opt() });
   else if (command === 'send') options.stdin = opt();
   else if (command === 'input') Object.assign(options, { key: opt('string'), enter: opt() });
-  else if (command === 'start') Object.assign(options, { cwd: opt('string'), model: opt('string'), executable: opt('string'), native: opt(), pane: opt('string'), split: opt('string'), target: opt('string'), workspace: opt('string'), tab: opt('string') });
+  else if (command === 'start') Object.assign(options, { cwd: opt('string'), model: opt('string'), resume: opt('string'), executable: opt('string'), native: opt(), pane: opt('string'), split: opt('string'), target: opt('string'), workspace: opt('string'), tab: opt('string') });
   else if (command === 'wait') options.timeout = opt('string');
   else if (!['resume', 'close', 'integration', 'view', 'version', 'update'].includes(command)) throw Error(tr(`Unknown command: ${quote(command)}\n${rootHelp}`, `未知命令：${quote(command)}\n${rootHelp}`));
   let values, positionals;
@@ -492,6 +566,7 @@ async function run([command, ...args]) {
     if (id === 'agy' && providerArgs.length) throw Error('Raw arguments are not supported for agy');
     if (id === 'agy' && argument?.includes('\0')) throw Error(tr('AGY native startup prompts must not contain NUL', 'AGY 原生启动提示词不能包含空字符'));
     if (!values.native && providerArgs.length && id !== 'omp') throw Error(tr('Raw arguments for this provider require --native', '此提供方仅在 --native 模式下支持原始参数'));
+    if (!values.native && values.resume !== undefined) throw Error(tr('--resume on start requires --native (use perch resume <id> for managed sessions)', 'start 的 --resume 需要 --native（托管会话请使用 perch resume <id>）'));
     validatePaneOptions(values);
     const api = await adapter(id);
     const cwd = await realpath(values.cwd ?? process.cwd());
@@ -500,6 +575,15 @@ async function run([command, ...args]) {
       if (values.pane === undefined) throw Error(tr('--native requires --pane right, tern, tmux, or herdr', '--native 需要 --pane right、tern、tmux 或 herdr'));
       if (values.model !== undefined && (!values.model.trim() || values.model.startsWith('-') || /[\x00-\x1f\x7f-\x9f]/u.test(values.model))) {
         throw Error(tr('Invalid model', '模型无效'));
+      }
+      if (values.resume !== undefined) {
+        if (!['omp', 'agy'].includes(id)) throw Error(tr('--resume with --native is only supported for omp and agy', '--native --resume 仅支持 omp 和 agy'));
+        if (!values.resume.trim() || values.resume.startsWith('-') || /[\s\x00-\x1f\x7f-\x9f]/u.test(values.resume)) {
+          throw Error(tr('Invalid resume session ID', '恢复会话 ID 无效'));
+        }
+        if (id === 'agy' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(values.resume)) {
+          throw Error(tr('Invalid AGY resume conversation UUID', 'AGY 恢复会话 UUID 无效'));
+        }
       }
       if (id === 'claude' && (!values.executable || !isAbsolute(values.executable))) {
         throw Error(tr('Pass the absolute path to the trusted native Claude executable, not a wrapper.', '请传入可信 Claude 原生可执行文件的绝对路径，不要使用包装程序。'));
