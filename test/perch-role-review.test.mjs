@@ -45,7 +45,7 @@ perch:
   assert.equal(cfg.roles.c.reviewMinChars, undefined);
 });
 
-test('a role with reviewMode reviews the director reply, pushes suggestions once, and stays silent on OK', async t => {
+async function createReviewHarness(t, rolesYaml) {
   const root = await mkdtemp(join(tmpdir(), 'perch-review-run-'));
   const home = join(root, 'home');
   const cwd = join(root, 'work');
@@ -59,12 +59,7 @@ perch:
   default: true
   heartbeatSeconds: 0
   roles:
-    readability:
-      provider: omp
-      model: cheap/model
-      capabilities: readability of replies
-      reviewMode: agent-end
-      reviewMinChars: 20
+${rolesYaml}
 `);
 
   const fakePerch = join(bin, 'fake-perch');
@@ -75,8 +70,11 @@ const chunks = [];
 process.stdin.on('data', c => chunks.push(c));
 process.stdin.on('end', () => {
   appendFileSync(process.env.MOCK_LOG, JSON.stringify({ args, stdin: Buffer.concat(chunks).toString('utf8') }) + '\\n');
-  if (args[0] === 'start') console.log(JSON.stringify({ id: 'omp:cccccccc-cccc-4ccc-8ccc-cccccccccccc', provider: 'omp' }));
-  else if (args[0] === 'send') console.log(JSON.stringify({ accepted: true }));
+  if (args[0] === 'start') {
+    const model = args[args.indexOf('--model') + 1];
+    const id = model === 'turn/model' ? 'omp:dddddddd-dddd-4ddd-8ddd-dddddddddddd' : 'omp:cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    console.log(JSON.stringify({ id, provider: 'omp' }));
+  } else if (args[0] === 'send') console.log(JSON.stringify({ accepted: true }));
   else if (args[0] === 'wait') console.log(JSON.stringify({ id: args[1], status: 'completed' }));
   else if (args[0] === 'history') console.log(JSON.stringify([{ role: 'assistant', text: readFileSync(process.env.MOCK_REPLY, 'utf8') }]));
   else if (args[0] === 'list') console.log('[]');
@@ -124,26 +122,37 @@ process.stdin.on('end', () => {
   await handlers.get('session_start')({}, ctx);
 
   const calls = async () => (await readFile(log, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse);
+  const message = (text, stopReason = 'stop') => handlers.get('message_end')({ message: { role: 'assistant', stopReason, content: text === undefined ? [] : [{ type: 'text', text }] } }, ctx);
+  const beginRun = prompt => handlers.get('before_agent_start')({ reason: 'prompt', prompt, systemPrompt: ['BASE'] }, ctx);
   const finishRun = async text => {
-    await handlers.get('before_agent_start')({ reason: 'prompt', prompt: 'summarize the incident', systemPrompt: ['BASE'] }, ctx);
-    handlers.get('message_end')({ message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text }] } }, ctx);
+    await beginRun('summarize the incident');
+    message(text);
     await handlers.get('agent_end')({}, ctx);
   };
+  return { ctx, handlers, sent, calls, replyFile, message, beginRun, finishRun };
+}
+
+test('a role with reviewMode reviews the director reply, pushes suggestions once, and stays silent on OK', async t => {
+  const h = await createReviewHarness(t, `    readability:
+      provider: omp
+      model: cheap/model
+      capabilities: readability of replies
+      reviewMode: agent-end
+      reviewMinChars: 20`);
 
   // 1. Too short for reviewMinChars: no review
-  await finishRun('short');
+  await h.finishRun('short');
   await sleep(150);
-  assert.equal((await calls()).length, 0);
+  assert.equal((await h.calls()).length, 0);
 
   // 2. Long reply: reviewer is started with the role provider/model, sees user request and reply, suggestions are pushed
-  const longReply = 'The incident began at 09:00 and affected three services; here is the long unstructured explanation.';
-  await finishRun(longReply);
-  await until(() => sent.some(s => s.message.customType === 'perch-review-note'));
-  const note = sent.find(s => s.message.customType === 'perch-review-note');
+  await h.finishRun('The incident began at 09:00 and affected three services; here is the long unstructured explanation.');
+  await until(() => h.sent.some(s => s.message.customType === 'perch-review-note'));
+  const note = h.sent.find(s => s.message.customType === 'perch-review-note');
   assert.deepEqual(note.options, { triggerTurn: true, deliverAs: 'followUp' });
   assert.match(note.message.content, /\[Perch review: readability\] \(agent-end\)/);
   assert.match(note.message.content, /Use headings and a table\./);
-  const first = await calls();
+  const first = await h.calls();
   const start = first.find(c => c.args[0] === 'start');
   assert.deepEqual(start.args.slice(0, 2), ['start', 'omp']);
   assert.ok(start.args.includes('--model') && start.args.includes('cheap/model'));
@@ -154,16 +163,61 @@ process.stdin.on('end', () => {
 
   // 3. The revision that answers the review note is not reviewed again
   const sendsBefore = first.filter(c => c.args[0] === 'send').length;
-  await finishRun('Revised: the incident began at 09:00 and affected three services (table follows).');
+  await h.finishRun('Revised: the incident began at 09:00 and affected three services (table follows).');
   await sleep(200);
-  assert.equal((await calls()).filter(c => c.args[0] === 'send').length, sendsBefore);
+  assert.equal((await h.calls()).filter(c => c.args[0] === 'send').length, sendsBefore);
 
   // 4. A later reply is reviewed again by the same session; an OK verdict stays silent
-  await writeFile(replyFile, 'OK');
-  const notesBefore = sent.filter(s => s.message.customType === 'perch-review-note').length;
-  await finishRun('A different, sufficiently long reply that is already well structured and clear.');
-  await until(async () => (await calls()).filter(c => c.args[0] === 'send').length === sendsBefore + 1);
+  await writeFile(h.replyFile, 'OK');
+  const notesBefore = h.sent.filter(s => s.message.customType === 'perch-review-note').length;
+  await h.finishRun('A different, sufficiently long reply that is already well structured and clear.');
+  await until(async () => (await h.calls()).filter(c => c.args[0] === 'send').length === sendsBefore + 1);
   await sleep(150);
-  assert.equal(sent.filter(s => s.message.customType === 'perch-review-note').length, notesBefore);
-  assert.equal((await calls()).filter(c => c.args[0] === 'start').length, 1, 'the reviewer session is reused');
+  assert.equal(h.sent.filter(s => s.message.customType === 'perch-review-note').length, notesBefore);
+  assert.equal((await h.calls()).filter(c => c.args[0] === 'start').length, 1, 'the reviewer session is reused');
 });
+
+test('turn mode reviews each assistant message with text, agent-end roles only run when the agent run ends', async t => {
+  const h = await createReviewHarness(t, `    per-turn:
+      provider: omp
+      model: turn/model
+      capabilities: per turn check
+      reviewMode: turn
+      reviewMinChars: 10
+    at-end:
+      provider: omp
+      model: end/model
+      capabilities: final check
+      reviewMode: agent-end
+      reviewMinChars: 10`);
+  await writeFile(h.replyFile, 'OK');
+  const starts = async () => (await h.calls()).filter(c => c.args[0] === 'start').map(c => c.args[c.args.indexOf('--model') + 1]);
+
+  // Messages that must NOT trigger turn reviews: no text, errors/aborts, below reviewMinChars
+  await h.beginRun('please check the deploy');
+  h.message(undefined, 'toolUse');
+  h.message('A long assistant message that failed with an error.', 'error');
+  h.message('A long assistant message that was aborted midway.', 'aborted');
+  h.message('tiny', 'stop');
+  await sleep(200);
+  assert.deepEqual(await starts(), []);
+
+  // A tool-use turn with commentary triggers the turn role only (agent-end role waits for the run to end)
+  h.message('I am inspecting the deployment logs before answering.', 'toolUse');
+  await until(async () => (await starts()).length === 1);
+  assert.deepEqual(await starts(), ['turn/model']);
+
+  // Final message of the run: the turn role sees it too, and agent_end then triggers the agent-end role with that same text
+  h.message('Final answer: the deploy is healthy and nothing needs attention.', 'stop');
+  await handlers_agentEnd(h);
+  await until(async () => (await starts()).includes('end/model'));
+  await until(async () => (await h.calls()).some(c => c.args[0] === 'send' && /final check/.test(c.stdin)));
+  const sends = (await h.calls()).filter(c => c.args[0] === 'send');
+  assert.ok(sends.some(c => /final check/.test(c.stdin) && /Final answer: the deploy is healthy/.test(c.stdin)));
+  assert.ok(sends.some(c => /per turn check/.test(c.stdin) && /inspecting the deployment logs/.test(c.stdin)));
+  assert.deepEqual((await starts()).sort(), ['end/model', 'turn/model']);
+});
+
+async function handlers_agentEnd(h) {
+  await h.handlers.get('agent_end')({}, h.ctx);
+}
