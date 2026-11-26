@@ -1,13 +1,25 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:net';
 import { existsSync, mkdirSync, lstatSync, chmodSync, openSync, writeFileSync, closeSync, realpathSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import type { ExtensionAPI, ExtensionContext } from '@oh-my-pi/pi-coding-agent';
 import { systemLanguage } from './locale.mjs';
 import { translateDiagnostic } from './diagnostics.mjs';
+import { loadPerchConfig, renderPerchSystemPrompt, renderRolesTable, type PerchModeConfig, type PerchRoleConfig } from './perch-config.ts';
+import { BoardStore, type Command, type ReceiptNotice } from './board/store.ts';
+import { DiscussionFailure, summarizeDiscussion, type DiscussionModelContext } from './board/discussion.ts';
+import { startBoardWeb } from './board/web.ts';
+import {
+  actorFor, awaitSpawn, boardPath, boardView, captureTurn, itemSummary, managerGuidance, mutationSummary, newSpawnToken,
+  perchWorkerBoardPrompt, promptSpawnToken, recordPerchWorkerReceipt, recordTurn, rootSession, runBoardCommand, withBoard,
+  workerContext, workerDecisionVersion, type CapturedTurn, type SessionContext, type TodoPhase,
+} from './board/runtime.ts';
+
+const execFileAsync = promisify(execFile);
 
 const PROVIDERS = new Set(['omp', 'codex', 'claude', 'agy']);
 const NATIVE_DEFAULT_PROVIDERS = new Set(['omp', 'agy']);
@@ -16,10 +28,17 @@ const MAX_CLI_STDOUT = 16 * 1024 * 1024;
 const MAX_NOTIFICATION_CHARS = 4000;
 const MAX_HEARTBEAT_PREVIEW_CHARS = 600;
 const DEFAULT_HEARTBEAT_SECONDS = 180;
-const DEFAULT_NATIVE_DISCOVER_MS = 20000;
+const DEFAULT_NATIVE_DISCOVER_MS = 40000;
+const SEND_BUSY_GRACE_MS = 3000;
+
+type PaneRef = {
+  backend: string;
+  id: string;
+};
 
 type PerchToolParams = {
   op: string;
+  role?: string;
   provider?: string;
   id?: string;
   name?: string;
@@ -33,6 +52,8 @@ type PerchToolParams = {
   tab?: string;
   prompt?: string;
   text?: string;
+  item?: string;
+  boardRole?: 'execute' | 'review';
   notify?: boolean;
   heartbeatSeconds?: number;
   timeout?: number;
@@ -52,10 +73,14 @@ type TaskState = 'idle' | 'running' | 'completed' | 'failed' | 'needs_input' | '
 type TrackedTask = {
   id: string;
   name?: string;
+  role?: string;
   provider?: string;
   mode?: 'managed' | 'native';
   model?: string;
   cwd?: string;
+  pane?: PaneRef;
+  boardItem?: string;
+  boardRoot?: string;
   state: TaskState;
   unhandled: boolean;
   finishSeq: number;
@@ -69,6 +94,12 @@ type WatcherEntry = {
   controller: AbortController;
   generation: number;
   timer?: ReturnType<typeof setInterval>;
+};
+
+type LiveOwner = {
+  sessionManager: { getSessionId(): string; getSessionFile(): string | undefined };
+  getToolByName?(name: string): unknown;
+  getTodoPhases?(): TodoPhase[];
 };
 
 function resolvePerchInvocation(): [string, string[]] {
@@ -169,7 +200,7 @@ function sanitizeName(value: string | undefined): string | undefined {
   return cleaned.slice(0, 64);
 }
 
-function resolveHeartbeatMs(heartbeatSeconds: number | undefined): number {
+function resolveHeartbeatMs(heartbeatSeconds: number | undefined, config: PerchModeConfig, perchModeEnabled: boolean): number {
   if (heartbeatSeconds !== undefined) {
     if (!Number.isSafeInteger(heartbeatSeconds) || heartbeatSeconds < 0 || heartbeatSeconds > 86400) {
       throw new Error('heartbeatSeconds must be an integer between 0 and 86400');
@@ -180,6 +211,9 @@ function resolveHeartbeatMs(heartbeatSeconds: number | undefined): number {
   if (envValue !== undefined && envValue !== '') {
     const parsed = Number(envValue);
     if (Number.isSafeInteger(parsed) && parsed >= 0) return parsed;
+  }
+  if (perchModeEnabled || config.sources.length > 0) {
+    return config.heartbeatSeconds * 1000;
   }
   return DEFAULT_HEARTBEAT_SECONDS * 1000;
 }
@@ -200,23 +234,68 @@ function clipText(text: string, limit: number): { text: string; truncated: boole
 }
 
 function taskLabel(id: string, task: TrackedTask | undefined): string {
-  const meta = [task?.provider, task?.model].filter(Boolean).join(' / ');
+  const meta = [task?.role, task?.provider, task?.model].filter(Boolean).join(' / ');
   const base = task?.name ? `${task.name} (${id})` : id;
   return meta ? `${base} [${meta}]` : base;
 }
 
-function resolveNativeDiscoverMs(): number {
+function resolveNativeDiscoverMs(config?: PerchModeConfig): number {
   const raw = process.env.PERCH_NATIVE_DISCOVER_MS?.trim();
   if (raw !== undefined && raw !== '') {
     const parsed = Number(raw);
-    if (Number.isSafeInteger(parsed) && parsed >= 100 && parsed <= 60000) return parsed;
+    if (Number.isSafeInteger(parsed) && parsed >= 100 && parsed <= 120000) return parsed;
   }
-  return DEFAULT_NATIVE_DISCOVER_MS;
+  return config?.discoverTimeoutMs ?? DEFAULT_NATIVE_DISCOVER_MS;
 }
 
 function canonicalDir(value: string | undefined): string | null {
   if (!value) return null;
   try { return realpathSync(value); } catch { return resolve(value); }
+}
+
+function normalizePaneRef(raw: unknown): PaneRef | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as { backend?: unknown; id?: unknown };
+  if (typeof obj.backend !== 'string' || !['tern', 'tmux', 'herdr'].includes(obj.backend)) return undefined;
+  if (typeof obj.id !== 'string' && typeof obj.id !== 'number') return undefined;
+  const id = String(obj.id).trim();
+  return id ? { backend: obj.backend, id } : undefined;
+}
+
+async function closePaneRef(pane: PaneRef | undefined): Promise<boolean> {
+  if (!pane) return false;
+  try {
+    if (pane.backend === 'tern') {
+      await execFileAsync('tern', ['close', pane.id], { timeout: 5000 });
+      return true;
+    }
+    if (pane.backend === 'tmux') {
+      await execFileAsync('tmux', ['kill-pane', '-t', pane.id], { timeout: 5000 });
+      return true;
+    }
+    if (pane.backend === 'herdr') {
+      await execFileAsync('herdr', ['pane', 'close', pane.id], { timeout: 5000 });
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+async function isTernBlockLive(blockId: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('tern', ['ls', '--json'], { timeout: 3000, maxBuffer: 4 * 1024 * 1024 });
+    const parsed = JSON.parse(stdout) as { sessions?: Array<{ tabs?: Array<{ blocks?: Array<{ id?: unknown; live?: boolean }> }> }> };
+    for (const session of parsed.sessions ?? []) {
+      for (const tab of session.tabs ?? []) {
+        for (const block of tab.blocks ?? []) {
+          if (String(block.id) === blockId && block.live === true) return true;
+        }
+      }
+    }
+  } catch {}
+  return false;
 }
 
 function stageAgyNativePrompt(uid: number, text: string): string {
@@ -240,6 +319,28 @@ function stageAgyNativePrompt(uid: number, text: string): string {
   return filePath;
 }
 
+function buildWorkerPrompt(
+  rawPrompt: string,
+  config: PerchModeConfig,
+  roleCfg: PerchRoleConfig | undefined,
+  boardContext: string | undefined,
+): string {
+  const parts: string[] = [];
+  if (config.workerPromptPrefix && !rawPrompt.includes(config.workerPromptPrefix.slice(0, 24))) {
+    parts.push(config.workerPromptPrefix);
+  }
+  if (roleCfg) {
+    const roleHints: string[] = [];
+    if (roleCfg.promptPrefix) roleHints.push(roleCfg.promptPrefix);
+    if (roleCfg.write === false) roleHints.push('只读边界：本轮禁止修改源码、配置文件或执行提交/推送。');
+    if (roleCfg.constraints) roleHints.push(`角色约束：${roleCfg.constraints}`);
+    if (roleHints.length) parts.push(`[Role: ${roleCfg.name}${roleCfg.label ? ` / ${roleCfg.label}` : ''}]\n${roleHints.join('\n')}`);
+  }
+  if (boardContext) parts.push(boardContext);
+  parts.push(rawPrompt);
+  return parts.join('\n\n');
+}
+
 function formatNotification(
   id: string,
   status: string,
@@ -252,11 +353,14 @@ function formatNotification(
     `Session: ${taskLabel(id, task)}`,
     `Status: ${status}${errorText ? ` — ${errorText}` : ''}`,
   ];
+  if (task?.boardItem) {
+    lines.push(`Board item: ${task.boardItem} (receipt recorded; inspect item & acceptance criteria before submitting/approving)`);
+  }
   if (replyText) {
     const clipped = clipText(replyText, MAX_NOTIFICATION_CHARS);
     lines.push('Latest assistant reply:', clipped.text);
   }
-  lines.push('Action: inspect this result, update the user with your current status/decision tables, and proceed with the next step (or call perch op=close for managed sessions when finished).');
+  lines.push('Action: inspect this result, update the user with your current status/decision tables, and proceed with the next step (call perch op=close when finished).');
   return lines.join('\n');
 }
 
@@ -282,19 +386,38 @@ function formatHeartbeat(
 function formatLedger(activeTasks: TrackedTask[], now: number): string {
   const rows = activeTasks.map(task => {
     const label = taskLabel(task.id, task);
+    const boardTag = task.boardItem ? ` [board:${task.boardItem}]` : '';
     if (task.state === 'running') {
       const elapsed = task.startedAt !== undefined ? ` (elapsed ${formatDuration(now - task.startedAt)})` : '';
-      return `- ${label}: running${elapsed}`;
+      return `- ${label}${boardTag}: running${elapsed}`;
     }
     const err = task.error ? ` — ${task.error}` : '';
     const flag = task.unhandled ? ' [UNHANDLED — inspect/report via perch history|send|close]' : '';
-    return `- ${label}: ${task.state}${err}${flag}`;
+    return `- ${label}${boardTag}: ${task.state}${err}${flag}`;
   });
   return [
     '[Perch active task ledger]',
     ...rows,
     'Track every running or UNHANDLED task above; do not drop dispatched work.',
   ].join('\n');
+}
+
+function discussionText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.flatMap(part => part && typeof part === 'object' && (part as { type?: string }).type === 'text' && typeof (part as { text?: unknown }).text === 'string'
+    ? [(part as { text: string }).text]
+    : []).join('\n');
+}
+
+function safeSessionFile(ctx: ExtensionContext | undefined): string | undefined {
+  try {
+    const sm = ctx?.sessionManager as { getSessionFile?: () => string | undefined } | undefined;
+    const file = sm?.getSessionFile?.();
+    return typeof file === 'string' && file.endsWith('.jsonl') ? file : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // Loaded explicitly or through the user's opt-in OMP integration.
@@ -312,11 +435,155 @@ export default function (pi: ExtensionAPI) {
   let watcherGeneration = 0;
   let finishCounter = 0;
   let pendingLedgerAck: Map<string, number> | undefined;
+  // Guard native OMP `send -> wait` race until agent loop flips isIdle() or emits agent_end.
+  let sendSeq = 0;
+  let agentEndSeq = 0;
+  let pendingSendUntil = 0;
+
+  // /perch mode state
+  let perchModeEnabled = false;
+  let savedToolsBeforePerch: string[] | undefined;
+
+  // Session board state (merged from omp-vibe-spawn)
+  let turn: CapturedTurn | undefined;
+  let decisionVersion: string | undefined;
+  let mainRoot: string | undefined;
+  let previousRoot: string | undefined;
+  let unsubscribeRegistry: (() => void) | undefined;
+  let decisionWatch: { root: string; store: BoardStore; version: number } | undefined;
+  let receiptContext: { root: string; sessionId: string; owner?: LiveOwner; notices: ReceiptNotice[] } | undefined;
+  let web: { root: string; sessionId: string; owner?: LiveOwner; store: BoardStore; server: { url: string; close(): void } } | undefined;
+  const discussionProcessing = new Map<string, { again: boolean }>();
+
   const admissions = new Set<Promise<void>>();
   const ownedSessions = new Set<string>();
   const tasks = new Map<string, TrackedTask>();
   const watchers = new Map<string, WatcherEntry>();
   const nativeLaunchChains = new Map<string, Promise<void>>();
+  const rightPaneStack: Array<{ id: string; sessionId: string }> = [];
+
+  const isManagedWorker = process.env.PERCH_MANAGED_WORKER === '1';
+
+  const anyPi = pi as unknown as {
+    pi?: { AgentRegistry?: { global(): { get(id: string): { session?: unknown } | undefined; onChange(cb: (ev: { type: string; ref: { kind: string; id: string; status: string; sessionFile?: string } }) => void): () => void } } };
+    arktype?: (schema: Record<string, unknown>) => unknown;
+    registerTool?: (tool: Record<string, unknown>) => void;
+    registerCommand?: (name: string, def: Record<string, unknown>) => void;
+    getActiveTools?: () => string[];
+    setActiveTools?: (names: string[]) => Promise<void>;
+    appendEntry?: (customType: string, data?: unknown) => void;
+    sendMessage?: (message: Record<string, unknown>, options?: Record<string, unknown>) => void;
+    sendUserMessage?: (content: string, options?: Record<string, unknown>) => Promise<void>;
+    getSessionName?: () => string | undefined;
+    exec?: (cmd: string, args: string[], opts?: { timeout?: number }) => Promise<{ code: number }>;
+  };
+
+  function isSubAgent(ctx: ExtensionContext | undefined): boolean {
+    return (ctx as unknown as { agent?: { kind?: string } } | undefined)?.agent?.kind === 'sub';
+  }
+
+  function currentAgentId(ctx: ExtensionContext | undefined): string {
+    return (ctx as unknown as { agent?: { id?: string } } | undefined)?.agent?.id ?? 'main';
+  }
+
+  function liveOwner(ctx: ExtensionContext): LiveOwner | undefined {
+    try {
+      const reg = anyPi.pi?.AgentRegistry?.global?.();
+      return reg?.get(currentAgentId(ctx))?.session as LiveOwner | undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function closeWeb() {
+    if (!web) return;
+    try { web.server.close(); } catch {}
+    try { web.store.close(); } catch {}
+    web = undefined;
+  }
+
+  function closeDecisionWatch() {
+    try { decisionWatch?.store.close(); } catch {}
+    decisionWatch = undefined;
+  }
+
+  function watchDecisions(root: string) {
+    if (decisionWatch?.root === root) return;
+    closeDecisionWatch();
+    const store = new BoardStore(boardPath(root));
+    decisionWatch = { root, store, version: store.dataVersion() };
+  }
+
+  function recoverBoard(root: string | undefined, reason: string) {
+    if (root?.endsWith('.jsonl')) {
+      try { withBoard(root, store => store.failPendingSpawns(reason), false); } catch {}
+    }
+  }
+
+  function updatePerchUi(ctx?: ExtensionContext) {
+    const target = ctx ?? current;
+    if (!target || isManagedWorker || isSubAgent(target)) return;
+    const ui = (target as unknown as { hasUI?: boolean; ui?: { setStatus?: (key: string, text: string | undefined) => void } }).ui;
+    if (!ui || typeof ui.setStatus !== 'function') return;
+    const running = [...tasks.values()].filter(t => t.state === 'running');
+    const unhandled = [...tasks.values()].filter(t => t.unhandled && t.state !== 'running');
+    if (!perchModeEnabled && !running.length && !unhandled.length) {
+      ui.setStatus('perch', undefined);
+      return;
+    }
+    const parts: string[] = [];
+    if (perchModeEnabled) parts.push('perch');
+    if (running.length) parts.push(`${running.length} running`);
+    if (unhandled.length) parts.push(`${unhandled.length} done`);
+    ui.setStatus('perch', parts.join(' · '));
+  }
+
+  function restorePerchModeFromBranch(ctx: ExtensionContext, config: PerchModeConfig): boolean {
+    if (isManagedWorker || isSubAgent(ctx)) return false;
+    try {
+      const branch = ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: { enabled?: unknown } }>;
+      for (let i = branch.length - 1; i >= 0; i--) {
+        const entry = branch[i];
+        if (entry?.type === 'custom' && entry.customType === 'perch-mode' && typeof entry.data?.enabled === 'boolean') {
+          return entry.data.enabled;
+        }
+      }
+    } catch {}
+    return ctx.mode === 'tui' && config.default === true;
+  }
+
+  async function syncPerchTools(ctx: ExtensionContext, config: PerchModeConfig): Promise<void> {
+    if (isManagedWorker || isSubAgent(ctx)) return;
+    if (typeof anyPi.getActiveTools !== 'function' || typeof anyPi.setActiveTools !== 'function') return;
+    const active = anyPi.getActiveTools();
+    if (perchModeEnabled) {
+      if (!savedToolsBeforePerch) savedToolsBeforePerch = [...active];
+      const disabled = new Set(config.disableTools);
+      const next = active.filter(tool => !disabled.has(tool));
+      if (!next.includes('perch')) next.push('perch');
+      if (config.board.enabled && !next.includes('board')) next.push('board');
+      if (next.length !== active.length || next.some((t, i) => t !== active[i])) {
+        await anyPi.setActiveTools(next);
+      }
+      return;
+    }
+    if (savedToolsBeforePerch) {
+      const restore = savedToolsBeforePerch;
+      savedToolsBeforePerch = undefined;
+      await anyPi.setActiveTools(restore);
+    }
+  }
+
+  async function setPerchMode(ctx: ExtensionContext, enabled: boolean, persist: boolean): Promise<PerchModeConfig> {
+    const config = loadPerchConfig({ cwd: ctx.cwd });
+    perchModeEnabled = enabled;
+    if (persist && typeof anyPi.appendEntry === 'function') {
+      try { anyPi.appendEntry('perch-mode', { enabled }); } catch {}
+    }
+    await syncPerchTools(ctx, config);
+    updatePerchUi(ctx);
+    return config;
+  }
 
   async function withNativeLaunchLock<T>(provider: string, fn: () => Promise<T>): Promise<T> {
     const previous = nativeLaunchChains.get(provider) ?? Promise.resolve();
@@ -330,6 +597,21 @@ export default function (pi: ExtensionAPI) {
     } finally {
       release();
       if (nativeLaunchChains.get(provider) === next) nativeLaunchChains.delete(provider);
+    }
+  }
+
+  async function findLiveRightStackTarget(): Promise<string | undefined> {
+    for (let i = rightPaneStack.length - 1; i >= 0; i--) {
+      const candidate = rightPaneStack[i];
+      if (await isTernBlockLive(candidate.id)) return candidate.id;
+      rightPaneStack.splice(i, 1);
+    }
+    return undefined;
+  }
+
+  function removePaneFromStack(sessionId: string) {
+    for (let i = rightPaneStack.length - 1; i >= 0; i--) {
+      if (rightPaneStack[i].sessionId === sessionId) rightPaneStack.splice(i, 1);
     }
   }
 
@@ -354,6 +636,7 @@ export default function (pi: ExtensionAPI) {
         heartbeatCount: 0,
       });
       if (options.notify) startWatcher(id, options.heartbeatMs);
+      updatePerchUi();
       return { accepted: true, notify: options.notify };
     }
     let parsed: { accepted?: boolean | null } | undefined;
@@ -376,6 +659,7 @@ export default function (pi: ExtensionAPI) {
           heartbeatCount: 0,
         });
         if (options.notify) startWatcher(id, options.heartbeatMs);
+        updatePerchUi();
         return {
           accepted: null,
           running: true,
@@ -402,10 +686,11 @@ export default function (pi: ExtensionAPI) {
     provider: string,
     cwd: string,
     beforeIds: Set<string>,
+    discoverMs: number,
     signal?: AbortSignal,
   ): Promise<string | undefined> {
     const targetCwd = canonicalDir(cwd);
-    const deadline = Date.now() + resolveNativeDiscoverMs();
+    const deadline = Date.now() + discoverMs;
     while (Date.now() < deadline) {
       if (signal?.aborted) throw Object.assign(new Error('Perch command aborted'), { name: 'AbortError' });
       const rows = await listProviderSessions(provider, signal);
@@ -430,7 +715,9 @@ export default function (pi: ExtensionAPI) {
     const idle = ctx.isIdle();
     const queued = ctx.hasPendingMessages();
     const jobs = ctx.getAsyncJobSnapshot?.();
-    if (admissions.size || watchers.size || idle === false || queued === true || jobs?.running?.length || jobs?.delivery?.queued) return 'running';
+    if (idle === false) pendingSendUntil = 0;
+    const sendGraceActive = sendSeq > agentEndSeq && Date.now() < pendingSendUntil;
+    if (admissions.size || watchers.size || sendGraceActive || idle === false || queued === true || jobs?.running?.length || jobs?.delivery?.queued) return 'running';
     return idle === true && queued === false ? 'idle' : 'unknown';
   }
 
@@ -468,10 +755,6 @@ export default function (pi: ExtensionAPI) {
   }
 
   function pushAgentEvent(customType: string, content: string, details: Record<string, unknown>) {
-    const anyPi = pi as unknown as {
-      sendMessage?: (message: Record<string, unknown>, options?: Record<string, unknown>) => void;
-      sendUserMessage?: (content: string, options?: Record<string, unknown>) => Promise<void>;
-    };
     if (typeof anyPi.sendMessage === 'function') {
       anyPi.sendMessage(
         { customType, content, display: true, attribution: 'agent', details },
@@ -511,8 +794,10 @@ export default function (pi: ExtensionAPI) {
       id,
       status,
       ...(task?.name ? { name: task.name } : {}),
+      ...(task?.role ? { role: task.role } : {}),
       ...(task?.provider ? { provider: task.provider } : {}),
       ...(task?.model ? { model: task.model } : {}),
+      ...(task?.boardItem ? { boardItem: task.boardItem } : {}),
       ...(errorText ? { error: errorText } : {}),
     });
   }
@@ -584,6 +869,13 @@ export default function (pi: ExtensionAPI) {
           finishedAt: Date.now(),
           error: errorText,
         });
+        if (task.boardRoot && task.boardItem) {
+          const receiptBody = replyText || (errorText ? `Worker ${status}: ${errorText}` : `Worker ${status}.`);
+          try {
+            recordPerchWorkerReceipt(task.boardRoot, id, `perch:${task.finishSeq}`, receiptBody);
+          } catch {}
+        }
+        updatePerchUi();
         deliverAsyncNotification(id, status, task, errorText, replyText);
       } catch (error) {
         if (watchers.get(id)?.generation === generation) {
@@ -599,28 +891,48 @@ export default function (pi: ExtensionAPI) {
           finishedAt: Date.now(),
           error: message,
         });
+        if (task.boardRoot && task.boardItem) {
+          try {
+            recordPerchWorkerReceipt(task.boardRoot, id, `perch:${task.finishSeq}`, `Worker failed: ${message}`);
+          } catch {}
+        }
+        updatePerchUi();
         deliverAsyncNotification(id, 'failed', task, message, undefined);
       }
     })();
   }
 
-  const isManagedWorker = process.env.PERCH_MANAGED_WORKER === '1';
+  async function closeTrackedWorker(id: string, signal?: AbortSignal): Promise<{ id: string; closed: boolean; paneClosed?: boolean }> {
+    const task = tasks.get(id);
+    cancelWatcher(id);
+    ownedSessions.delete(id);
+    tasks.delete(id);
+    removePaneFromStack(id);
+    if (task?.boardRoot) {
+      try {
+        withBoard(task.boardRoot, store => store.releaseWorker(id, 'Perch worker closed.'), false);
+      } catch {}
+    }
+    updatePerchUi();
+    if (task?.mode === 'native' || task?.pane) {
+      const paneClosed = await closePaneRef(task?.pane);
+      return { id, closed: true, paneClosed };
+    }
+    const result = await runPerchCli(['close', id, '--json'], { signal, timeoutMs: 15000 });
+    if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch close failed'));
+    return (parseJson(result.stdout) as { id: string; closed: boolean } | undefined) ?? { id, closed: true };
+  }
 
   async function ensureToolActiveInVibe(ctx: ExtensionContext) {
-    if (isManagedWorker) return;
+    if (isManagedWorker || isSubAgent(ctx)) return;
     const anyCtx = ctx as unknown as {
-      agent?: { kind?: string };
       sessionModes?: { getState?: () => { vibe?: { status?: string } } };
     };
-    const anyPi = pi as unknown as {
-      getActiveTools?: () => string[];
-      setActiveTools?: (names: string[]) => Promise<void>;
-    };
-    if (anyCtx.agent?.kind === 'sub') return;
     if (anyCtx.sessionModes?.getState?.()?.vibe?.status !== 'active') return;
     if (typeof anyPi.getActiveTools !== 'function' || typeof anyPi.setActiveTools !== 'function') return;
     const active = anyPi.getActiveTools();
-    if (!active.includes('perch')) await anyPi.setActiveTools([...new Set([...active, 'perch'])]);
+    const toAdd = ['perch', 'board'].filter(tool => !active.includes(tool));
+    if (toAdd.length) await anyPi.setActiveTools([...new Set([...active, ...toAdd])]);
   }
 
   function activate(ctx: ExtensionContext) {
@@ -635,6 +947,7 @@ export default function (pi: ExtensionAPI) {
     pause();
     await Promise.allSettled(admissions);
   }
+
   pi.registerCommand('perch-reconnect', {
     description: translateDiagnostic('Reconnect the local Perch bridge after a cancelled session transition', systemLanguage()),
     handler: async (_args, ctx) => {
@@ -644,21 +957,231 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  const anyPi = pi as unknown as {
-    registerTool?: (tool: Record<string, unknown>) => void;
-    arktype?: (schema: Record<string, unknown>) => unknown;
-  };
+  if (!isManagedWorker && typeof anyPi.registerCommand === 'function') {
+    anyPi.registerCommand('perch', {
+      description: 'Toggle /perch orchestration mode, inspect workers/roles, or close worker panes',
+      handler: async (rawArgs: string | undefined, ctx: ExtensionContext) => {
+        if (isSubAgent(ctx)) throw new Error('/perch is only available in the main session.');
+        const trimmed = (rawArgs ?? '').trim();
+        const [sub, ...rest] = trimmed ? trimmed.split(/\s+/) : [''];
+        const argRest = rest.join(' ').trim();
+
+        if (!sub || sub === 'toggle') {
+          const next = !perchModeEnabled;
+          const config = await setPerchMode(ctx, next, true);
+          const roleCount = Object.keys(config.roles).length;
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              next
+                ? `Perch mode ON (${roleCount} roles, layout=${config.layout}, board=${config.board.enabled ? 'on' : 'off'})`
+                : 'Perch mode OFF (restored default tools)',
+              'info',
+            );
+          }
+          return;
+        }
+        if (sub === 'on' || sub === 'off') {
+          const next = sub === 'on';
+          const config = await setPerchMode(ctx, next, true);
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              next
+                ? `Perch mode ON (${Object.keys(config.roles).length} roles, layout=${config.layout})`
+                : 'Perch mode OFF (restored default tools)',
+              'info',
+            );
+          }
+          return;
+        }
+        if (sub === 'roles') {
+          const config = loadPerchConfig({ cwd: ctx.cwd });
+          const table = renderRolesTable(config.roles);
+          if (ctx.hasUI) {
+            ctx.ui.notify(table || 'No perch.roles configured in config.yml', 'info');
+          }
+          return;
+        }
+        if (sub === 'status') {
+          const now = Date.now();
+          const lines = [`Perch mode: ${perchModeEnabled ? 'ON' : 'OFF'}`];
+          if (!tasks.size) {
+            lines.push('No tracked workers.');
+          } else {
+            for (const task of tasks.values()) {
+              const elapsed = task.startedAt !== undefined
+                ? formatDuration((task.state === 'running' ? now : (task.finishedAt ?? now)) - task.startedAt)
+                : '-';
+              const paneText = task.pane ? ` pane=${task.pane.backend}:${task.pane.id}` : '';
+              const boardText = task.boardItem ? ` board=${task.boardItem}` : '';
+              lines.push(`- ${taskLabel(task.id, task)}: ${task.state} (${elapsed})${paneText}${boardText}`);
+            }
+          }
+          if (ctx.hasUI) ctx.ui.notify(lines.join('\n'), 'info');
+          return;
+        }
+        if (sub === 'close') {
+          const target = argRest || 'all';
+          const matches = target === 'all'
+            ? [...tasks.keys()]
+            : [...tasks.values()].filter(t => t.id === target || t.name === target).map(t => t.id);
+          if (!matches.length) {
+            if (ctx.hasUI) ctx.ui.notify(`No tracked worker matching "${target}".`, 'warning');
+            return;
+          }
+          const results = await Promise.allSettled(matches.map(id => closeTrackedWorker(id)));
+          const closed = results.filter(r => r.status === 'fulfilled').length;
+          if (ctx.hasUI) ctx.ui.notify(`Closed ${closed}/${matches.length} worker(s).`, 'info');
+          return;
+        }
+        // `/perch <task prompt>`: enable mode and immediately send prompt to director.
+        if (!perchModeEnabled) {
+          await setPerchMode(ctx, true, true);
+        }
+        if (typeof anyPi.sendUserMessage === 'function') {
+          await anyPi.sendUserMessage(trimmed);
+        }
+      },
+    });
+
+    anyPi.registerCommand('board', {
+      description: 'Open this session’s shared board',
+      handler: async (_args: string | undefined, ctx: ExtensionContext) => {
+        if (isSubAgent(ctx) || !ctx.hasUI) throw new Error('/board is available in the owning interactive session.');
+        const root = rootSession(ctx as unknown as SessionContext);
+        const owner = liveOwner(ctx);
+        if (owner && owner.sessionManager.getSessionFile() !== root) throw new Error('Board owner session is unavailable.');
+        const sessionId = owner?.sessionManager.getSessionId() ?? ctx.sessionManager.getSessionId();
+        if (web && (web.root !== root || web.sessionId !== sessionId || web.owner !== owner)) closeWeb();
+        if (!web) {
+          mkdirSync(dirname(boardPath(root)), { recursive: true });
+          const store = new BoardStore(boardPath(root));
+          try {
+            const webServer = await startBoardWeb(store, (message, target) => {
+              const currentOwner = liveOwner(ctx);
+              if (web?.server !== webServer || (owner && currentOwner !== owner) ||
+                  safeSessionFile(ctx) !== root || ctx.sessionManager.getSessionId() !== sessionId) {
+                throw new Error('The board’s owning session is no longer active.');
+              }
+              const token = newSpawnToken();
+              store.reserveDiscussion(token, target);
+              void anyPi.sendUserMessage?.(`${message}\n\nomp-board-discussion:${token}`);
+            }, () => ({ id: sessionId, name: anyPi.getSessionName?.() }));
+            web = { root, sessionId, owner, store, server: webServer };
+          } catch (error) {
+            store.close();
+            throw error;
+          }
+        }
+        const ui = (ctx as unknown as { ui?: { setStatus?: (k: string, v: string | undefined) => void; notify?: (m: string, l?: string) => void } }).ui;
+        ui?.setStatus?.('board', web.server.url);
+        ui?.notify?.(`Board: ${web.server.url}`, 'info');
+        const ternPane = process.env.TERN_PANE;
+        if (ternPane && /^\d+$/.test(ternPane) && Number.isSafeInteger(Number(ternPane))) {
+          try {
+            const operation = JSON.stringify({ op: 'open', owner: Number(ternPane), url: web.server.url, how: 'beside' });
+            if (typeof anyPi.exec === 'function') {
+              if ((await anyPi.exec('tern', ['browser', operation, '--timeout', '3'], { timeout: 5000 })).code === 0) return;
+            } else {
+              await execFileAsync('tern', ['browser', operation, '--timeout', '3'], { timeout: 5000 });
+              return;
+            }
+          } catch {}
+        }
+        const opener = process.platform === 'darwin' ? ['open'] :
+          process.platform === 'linux' ? ['xdg-open'] :
+          process.platform === 'win32' ? ['rundll32.exe', 'url.dll,FileProtocolHandler'] : undefined;
+        try {
+          if (!opener) throw new Error('Browser opener unavailable');
+          if (typeof anyPi.exec === 'function') {
+            if ((await anyPi.exec(opener[0], [...opener.slice(1), web.server.url], { timeout: 5000 })).code !== 0) {
+              throw new Error('Browser opener unavailable');
+            }
+          } else {
+            await execFileAsync(opener[0], [...opener.slice(1), web.server.url], { timeout: 5000 });
+          }
+        } catch {
+          ui?.notify?.('Could not open the browser automatically; use the board link shown above.', 'warning');
+        }
+      },
+    });
+  }
+
   if (!isManagedWorker && typeof anyPi.registerTool === 'function' && typeof anyPi.arktype === 'function') {
     const type = anyPi.arktype;
+
+    anyPi.registerTool({
+      name: 'board',
+      label: 'Session Board',
+      approval: 'write',
+      loadMode: 'essential',
+      strict: true,
+      description: 'Inspect and update this root session’s shared work and decisions. Use op=snapshot for a concise list or add item or decision to read details; mutations return only a changed-item/decision summary. create accepts an optional parentId of an existing item; omit it or use null for a root. Parent relationships cannot be edited. create/edit use a title of at most 80 Unicode code points and a separate description for full requirements; criteria are acceptance criteria. create/edit/assign/progress/submit/approve/reject/release/cancel manage items; use progress with handoff=true for durable confirmed or ruled-out findings, blockers and next steps. decide/note_decision/replace manage decisions. Main may list real session todos with op=todos and explicitly promote one with op=promote, task, optional phase, and criteria.',
+      parameters: type({
+        op: 'string > 0',
+        'item?': 'string',
+        'parentId?': 'string | null',
+        'decision?': 'string',
+        'title?': 'string',
+        'description?': 'string',
+        'criteria?': 'string',
+        'text?': 'string',
+        'worker?': 'string',
+        'role?': "'execute' | 'review'",
+        'target?': "'same' | 'pool'",
+        'revision?': 'number',
+        'source?': 'string',
+        'items?': 'string[]',
+        'priority?': 'number',
+        'handoff?': 'boolean',
+        'task?': 'string',
+        'phase?': 'string',
+      }),
+      async execute(_id: string, params: Record<string, unknown>, _signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) {
+        const root = rootSession(ctx as unknown as SessionContext);
+        if (params.op === 'todos' || params.op === 'promote') {
+          if (isSubAgent(ctx)) throw new Error('Only the main session can access its native todos.');
+          const owner = liveOwner(ctx);
+          if (!owner || owner.sessionManager.getSessionFile() !== root || typeof owner.getTodoPhases !== 'function') {
+            throw new Error('Native session todos are unavailable.');
+          }
+          const phases = owner.getTodoPhases();
+          const result = params.op === 'todos'
+            ? phases
+            : withBoard(root, store => ({
+                item: itemSummary(promoteTodo(store, phases, String(params.task ?? ''), typeof params.phase === 'string' ? params.phase : undefined, String(params.criteria ?? ''))),
+              }));
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+        }
+        const { task: _task, phase: _phase, ...command } = params;
+        if (params.op === 'snapshot') {
+          const result = withBoard(root, store => boardView(
+            store.snapshot(),
+            typeof params.item === 'string' ? params.item : undefined,
+            typeof params.decision === 'string' ? params.decision : undefined,
+          ));
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+        }
+        if (isSubAgent(ctx) && (!turn || turn.root !== root || turn.worker !== currentAgentId(ctx))) {
+          throw new Error('Worker has no board assignment for this turn.');
+        }
+        const result = mutationSummary(
+          runBoardCommand(root, actorFor(ctx as unknown as SessionContext, root, turn?.attempt), command as Command),
+          command as Command,
+        );
+        return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+      },
+    });
+
     anyPi.registerTool({
       name: 'perch',
       label: 'Perch',
       approval: 'exec',
       loadMode: 'essential',
       strict: true,
-      description: 'Manage local agent sessions (agy, omp, codex, claude) through Perch. Both native and managed starts run in full-access / yolo mode by default. In interactive TUI mode, op=start defaults to native=true with pane=right for omp and agy (opens a live native TUI side pane, discovers its session ID, sends prompt, and attaches async completion pushback); pass native=false for headless managed background sessions. Do NOT block with op=wait(timeout>0) or bash sleep loops — rely on notify=true async updates, op=list(owned=true), and op=wait(timeout=0). If op=send reports busy, the message was rejected (NOT queued); wait until idle before resending.',
+      description: 'Manage local agent sessions (agy, omp, codex, claude) through Perch. Both native and managed starts run in full-access / yolo mode by default. On op=start you can pass `role` (from config.yml perch.roles) to automatically fill provider, model, native pane, worker identity prefix, and constraints; optionally pass `item` + `boardRole` (execute|review) to bind a session board item. In interactive TUI mode, op=start defaults to native=true with stacked right-side panes for omp and agy; pass native=false for headless managed sessions. Do NOT block with op=wait(timeout>0) or bash sleep loops — rely on notify=true async updates, op=list(owned=true), and op=wait(timeout=0). If op=send reports busy, the message was rejected (NOT queued); wait until idle before resending.',
       parameters: type({
         op: "'list' | 'start' | 'send' | 'wait' | 'history' | 'resume' | 'close'",
+        'role?': 'string > 0',
         'provider?': "'omp' | 'codex' | 'claude' | 'agy'",
         'id?': 'string > 0',
         'name?': 'string > 0',
@@ -672,6 +1195,8 @@ export default function (pi: ExtensionAPI) {
         'tab?': 'string > 0',
         'prompt?': 'string > 0',
         'text?': 'string > 0',
+        'item?': 'string > 0',
+        'boardRole?': "'execute' | 'review'",
         'notify?': 'boolean',
         'heartbeatSeconds?': 'number',
         'timeout?': 'number',
@@ -679,6 +1204,10 @@ export default function (pi: ExtensionAPI) {
         'all?': 'boolean',
       }),
       async execute(_toolCallId: string, params: PerchToolParams, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) {
+        if (isSubAgent(ctx)) {
+          throw new Error('perch tool is only available in the main orchestrator session, not inside subagents.');
+        }
+        const config = loadPerchConfig({ cwd: params.cwd || ctx.cwd });
         const emit = (details: unknown) => ({
           content: [{ type: 'text', text: JSON.stringify(details) }],
           details,
@@ -708,8 +1237,12 @@ export default function (pi: ExtensionAPI) {
               rows.push({
                 id,
                 ...(task?.name ? { name: task.name } : {}),
+                ...(task?.role ? { role: task.role } : {}),
                 provider,
                 ...(task?.model ? { model: task.model } : {}),
+                ...(task?.mode ? { mode: task.mode } : {}),
+                ...(task?.pane ? { pane: task.pane } : {}),
+                ...(task?.boardItem ? { boardItem: task.boardItem } : {}),
                 state: task?.state ?? (typeof live?.status === 'string' ? live.status : 'unknown'),
                 unhandled: task?.unhandled ?? false,
                 liveStatus: typeof live?.status === 'string' ? live.status : 'stopped',
@@ -728,168 +1261,283 @@ export default function (pi: ExtensionAPI) {
               ...row,
               owned: true,
               ...(task?.name ? { name: task.name } : {}),
+              ...(task?.role ? { role: task.role } : {}),
+              ...(task?.boardItem ? { boardItem: task.boardItem } : {}),
               ...(task?.unhandled ? { unhandled: true } : {}),
             };
           });
           return emit(enriched);
         }
         if (params.op === 'start') {
-          if (!params.provider || !PROVIDERS.has(params.provider)) {
-            throw new Error('perch start requires provider (agy, omp, codex, or claude)');
+          let roleCfg: PerchRoleConfig | undefined;
+          if (params.role !== undefined) {
+            roleCfg = config.roles[params.role];
+            if (!roleCfg) {
+              const known = Object.keys(config.roles);
+              throw new Error(`Unknown perch role "${params.role}".${known.length ? ` Configured roles: ${known.join(', ')}` : ' No perch.roles configured in config.yml.'}`);
+            }
           }
+          const provider = params.provider ?? roleCfg?.provider;
+          if (!provider || !PROVIDERS.has(provider)) {
+            throw new Error('perch start requires provider (agy, omp, codex, or claude) or a configured role');
+          }
+          const model = params.model ?? roleCfg?.model;
           if (params.prompt !== undefined && !params.prompt.trim()) throw new Error('prompt must not be empty');
-          const heartbeatMs = resolveHeartbeatMs(params.heartbeatSeconds);
+          if ((params.item !== undefined) !== (params.boardRole !== undefined)) {
+            throw new Error('Binding a board item requires both item and boardRole (execute or review).');
+          }
+
+          const heartbeatMs = resolveHeartbeatMs(params.heartbeatSeconds, config, perchModeEnabled);
           const taskName = sanitizeName(params.name);
           const cwd = params.cwd || ctx.cwd;
-          const defaultNative = ctx.mode === 'tui' && NATIVE_DEFAULT_PROVIDERS.has(params.provider);
-          const useNative = params.native !== undefined ? params.native : defaultNative;
+          const defaultNative = ctx.mode === 'tui' && NATIVE_DEFAULT_PROVIDERS.has(provider);
+          const useNative = params.native !== undefined
+            ? params.native
+            : roleCfg?.native !== undefined
+              ? (ctx.mode === 'tui' ? roleCfg.native : false)
+              : config.native !== undefined
+                ? (ctx.mode === 'tui' ? config.native : false)
+                : defaultNative;
 
-          if (useNative) {
-            const pane = params.pane ?? 'right';
-            if (!PANES.has(pane)) throw new Error(`Unsupported pane: ${pane}`);
-            // Native agy only emits its SessionStart hook once a first turn starts, and macOS
-            // ps flattens argv on spaces; pass a zero-space file reference via --prompt-interactive
-            // so the TUI starts Turn 1 immediately while staying 100% discoverable on macOS.
-            const agyInlineLaunchPrompt = params.provider === 'agy' && params.prompt !== undefined
-              ? `请阅读并严格执行该文件中的完整指令:${stageAgyNativePrompt(uid, params.prompt)}`
-              : undefined;
-            const nativeResult = await withNativeLaunchLock(params.provider, async () => {
-              const beforeRows = await listProviderSessions(params.provider!, signal);
-              const beforeIds = new Set(beforeRows.map(r => r?.id).filter((v): v is string => typeof v === 'string'));
-              const nativeArgs = ['start', params.provider!];
-              if (agyInlineLaunchPrompt !== undefined) nativeArgs.push(agyInlineLaunchPrompt);
-              nativeArgs.push('--native', '--pane', pane, '--cwd', cwd, '--json');
-              if (params.model) nativeArgs.push('--model', params.model);
-              if (params.executable) nativeArgs.push('--executable', params.executable);
-              if (params.workspace) nativeArgs.push('--workspace', params.workspace);
-              if (params.tab) nativeArgs.push('--tab', params.tab);
-              const childEnv = params.provider === 'omp'
-                ? { ...process.env, PERCH_MANAGED_WORKER: '1' }
-                : process.env;
-              const startedResult = await runPerchCli(nativeArgs, { signal, timeoutMs: 45000, env: childEnv });
-              if (startedResult.code !== 0) {
-                if (params.native === undefined) return { fallback: true as const };
-                throw new Error(cliErrorMessage(startedResult, 'perch start --native failed'));
-              }
-              const started = parseJson(startedResult.stdout) as { provider?: string; mode?: string; pane?: unknown };
-              if (params.provider === 'agy' && agyInlineLaunchPrompt === undefined) {
-                return { fallback: false as const, id: undefined, started, promptAlreadyDelivered: false };
-              }
-              const discoveredId = await waitForNewNativeSession(params.provider!, cwd, beforeIds, signal);
-              if (!discoveredId) {
-                throw new Error(`Native ${params.provider} pane opened, but no controllable session registered in time. Ensure perch integration install ${params.provider} is active, or retry with native=false.`);
-              }
-              ensureTask(discoveredId, {
-                ...(taskName ? { name: taskName } : {}),
-                provider: params.provider,
-                mode: 'native',
-                ...(params.model ? { model: params.model } : {}),
-                cwd,
-                state: agyInlineLaunchPrompt !== undefined ? 'running' : 'idle',
-                unhandled: false,
-                ...(agyInlineLaunchPrompt !== undefined ? { startedAt: Date.now(), finishedAt: undefined } : {}),
-                error: undefined,
-                heartbeatCount: 0,
-              });
-              return {
-                fallback: false as const,
-                id: discoveredId,
-                started,
-                promptAlreadyDelivered: agyInlineLaunchPrompt !== undefined,
-              };
-            });
-            if (!nativeResult.fallback) {
-              const { id, started, promptAlreadyDelivered } = nativeResult;
-              if (!id) {
-                return emit({
-                  provider: params.provider,
-                  mode: 'native',
-                  pane: started.pane,
-                  ...(taskName ? { name: taskName } : {}),
-                });
-              }
-              if (promptAlreadyDelivered) {
-                const shouldNotify = params.notify !== false;
-                if (shouldNotify) startWatcher(id, heartbeatMs);
-                return emit({
-                  id,
-                  provider: params.provider,
-                  mode: 'native',
-                  pane: started.pane,
-                  ...(taskName ? { name: taskName } : {}),
-                  accepted: true,
-                  notify: shouldNotify,
-                });
-              }
-              if (params.prompt !== undefined) {
-                const delivered = await deliverPrompt(id, params.prompt, {
-                  signal,
-                  notify: params.notify !== false,
-                  heartbeatMs,
-                  name: taskName,
-                });
-                return emit({
-                  id,
-                  provider: params.provider,
-                  mode: 'native',
-                  pane: started.pane,
-                  ...(taskName ? { name: taskName } : {}),
-                  ...delivered,
-                });
-              }
-              return emit({
-                id,
-                provider: params.provider,
-                mode: 'native',
-                pane: started.pane,
-                ...(taskName ? { name: taskName } : {}),
-              });
+          // Optional / automatic session board binding
+          const boardRoot = safeSessionFile(ctx);
+          const shouldBindBoard = !!boardRoot && (
+            params.item !== undefined ||
+            (config.board.enabled && config.board.autoCreate && (perchModeEnabled || existsSync(boardPath(boardRoot))))
+          );
+          let boardToken: string | undefined;
+          let reservedItemId: string | undefined;
+          let boardContextPrompt: string | undefined;
+          if (shouldBindBoard && boardRoot) {
+            boardToken = newSpawnToken();
+            if (params.item !== undefined && params.boardRole !== undefined) {
+              withBoard(boardRoot, store => store.beginSpawn(boardToken!, params.item!, params.boardRole!));
+              reservedItemId = params.item;
+              boardContextPrompt = perchWorkerBoardPrompt(boardRoot, reservedItemId, params.boardRole);
+            } else {
+              const brief = params.prompt?.split('\n').map(line => line.trim()).find(Boolean);
+              const title = [taskName, roleCfg?.label ?? roleCfg?.name, brief].filter(Boolean).join(': ') || `Perch ${provider} worker`;
+              withBoard(boardRoot, store => store.beginAutomaticSpawn(boardToken!, title, params.prompt ?? title));
+              reservedItemId = withBoard(boardRoot, store => {
+                const snap = store.snapshot();
+                // automatic pending spawn is hidden from snapshot; read via getSpawn/items directly
+                return snap.items.find(i => i.source === `spawn:${boardToken}`)?.id;
+              }, false);
             }
           }
 
-          const args = ['start', params.provider, '--cwd', cwd, '--json'];
-          if (params.model) args.push('--model', params.model);
-          if (params.executable) args.push('--executable', params.executable);
-          if (params.pane) {
-            if (!PANES.has(params.pane)) throw new Error(`Unsupported pane: ${params.pane}`);
-            args.push('--pane', params.pane);
-          }
-          if (params.workspace) args.push('--workspace', params.workspace);
-          if (params.tab) args.push('--tab', params.tab);
-          const startedResult = await runPerchCli(args, { signal, timeoutMs: 45000 });
-          if (startedResult.code !== 0) throw new Error(cliErrorMessage(startedResult, 'perch start failed'));
-          const started = parseJson(startedResult.stdout) as { id?: string; provider?: string; pane?: unknown };
-          if (!started?.id) throw new Error('perch start did not return a session ID');
-          ownedSessions.add(started.id);
-          ensureTask(started.id, {
-            ...(taskName ? { name: taskName } : {}),
-            provider: params.provider,
-            mode: 'managed',
-            ...(params.model ? { model: params.model } : {}),
-            cwd,
-            state: 'idle',
-            unhandled: false,
-            error: undefined,
-            heartbeatCount: 0,
-          });
-          if (params.prompt !== undefined) {
-            const delivered = await deliverPrompt(started.id, params.prompt, {
-              signal,
-              notify: params.notify !== false,
-              heartbeatMs,
-              name: taskName,
-            }).catch(error => {
-              throw new Error(`Session ${started.id} started, but initial send failed: ${error instanceof Error ? error.message : String(error)}`);
+          const failBoardReservation = (reason: string) => {
+            if (boardToken && boardRoot) {
+              try {
+                withBoard(boardRoot, store => {
+                  if (store.getSpawn(boardToken!)?.state === 'pending') store.failSpawn(boardToken!, reason);
+                }, false);
+              } catch {}
+            }
+          };
+
+          const commitBoardReservation = (workerId: string): string | undefined => {
+            if (!boardToken || !boardRoot) return undefined;
+            withBoard(boardRoot, store => store.commitSpawn(boardToken!, workerId));
+            return withBoard(boardRoot, store => store.bindingForWorker(workerId)?.item, false) ?? reservedItemId;
+          };
+
+          const effectivePrompt = params.prompt !== undefined
+            ? buildWorkerPrompt(params.prompt, config, roleCfg, boardContextPrompt)
+            : undefined;
+
+          try {
+            if (useNative) {
+              const pane = params.pane ?? 'right';
+              if (!PANES.has(pane)) throw new Error(`Unsupported pane: ${pane}`);
+              const agyInlineLaunchPrompt = provider === 'agy' && effectivePrompt !== undefined
+                ? `请阅读并严格执行该文件中的完整指令:${stageAgyNativePrompt(uid, effectivePrompt)}`
+                : undefined;
+              const discoverMs = resolveNativeDiscoverMs(config);
+              const nativeResult = await withNativeLaunchLock(provider, async () => {
+                const beforeRows = await listProviderSessions(provider, signal);
+                const beforeIds = new Set(beforeRows.map(r => r?.id).filter((v): v is string => typeof v === 'string'));
+                const nativeArgs = ['start', provider];
+                if (agyInlineLaunchPrompt !== undefined) nativeArgs.push(agyInlineLaunchPrompt);
+                nativeArgs.push('--native', '--pane', pane, '--cwd', cwd, '--json');
+                if (pane === 'right' && config.layout === 'stack' && !params.workspace && !params.tab) {
+                  const stackTarget = await findLiveRightStackTarget();
+                  if (stackTarget) {
+                    nativeArgs.push('--split', 'down', '--target', stackTarget);
+                  }
+                }
+                if (model) nativeArgs.push('--model', model);
+                if (params.executable) nativeArgs.push('--executable', params.executable);
+                if (params.workspace) nativeArgs.push('--workspace', params.workspace);
+                if (params.tab) nativeArgs.push('--tab', params.tab);
+                const childEnv = provider === 'omp'
+                  ? { ...process.env, PERCH_MANAGED_WORKER: '1' }
+                  : process.env;
+                const startedResult = await runPerchCli(nativeArgs, { signal, timeoutMs: 45000, env: childEnv });
+                if (startedResult.code !== 0) {
+                  if (params.native === undefined && roleCfg?.native === undefined) return { fallback: true as const };
+                  throw new Error(cliErrorMessage(startedResult, 'perch start --native failed'));
+                }
+                const started = parseJson(startedResult.stdout) as { provider?: string; mode?: string; pane?: unknown };
+                const paneRef = normalizePaneRef(started.pane);
+                if (provider === 'agy' && agyInlineLaunchPrompt === undefined) {
+                  return { fallback: false as const, id: undefined, started, paneRef, promptAlreadyDelivered: false };
+                }
+                const discoveredId = await waitForNewNativeSession(provider, cwd, beforeIds, discoverMs, signal);
+                if (!discoveredId) {
+                  // Clean up orphan pane on discovery timeout so it does not litter the terminal.
+                  await closePaneRef(paneRef);
+                  throw new Error(`Native ${provider} pane opened, but no controllable session registered in time (${Math.round(discoverMs / 1000)}s). Orphan pane closed. Ensure perch integration install ${provider} is active, or retry with native=false.`);
+                }
+                if (paneRef?.backend === 'tern') {
+                  rightPaneStack.push({ id: paneRef.id, sessionId: discoveredId });
+                }
+                const boundItem = commitBoardReservation(discoveredId);
+                ensureTask(discoveredId, {
+                  ...(taskName ? { name: taskName } : {}),
+                  ...(roleCfg ? { role: roleCfg.name } : {}),
+                  provider,
+                  mode: 'native',
+                  ...(model ? { model } : {}),
+                  cwd,
+                  ...(paneRef ? { pane: paneRef } : {}),
+                  ...(boundItem ? { boardItem: boundItem, boardRoot } : {}),
+                  state: agyInlineLaunchPrompt !== undefined ? 'running' : 'idle',
+                  unhandled: false,
+                  ...(agyInlineLaunchPrompt !== undefined ? { startedAt: Date.now(), finishedAt: undefined } : {}),
+                  error: undefined,
+                  heartbeatCount: 0,
+                });
+                updatePerchUi(ctx);
+                return {
+                  fallback: false as const,
+                  id: discoveredId,
+                  started,
+                  paneRef,
+                  boardItem: boundItem,
+                  promptAlreadyDelivered: agyInlineLaunchPrompt !== undefined,
+                };
+              });
+
+              if (!nativeResult.fallback) {
+                const { id, started, boardItem, promptAlreadyDelivered } = nativeResult;
+                if (!id) {
+                  failBoardReservation('Native session started without initial prompt or session ID.');
+                  return emit({
+                    provider,
+                    mode: 'native',
+                    pane: started.pane,
+                    ...(taskName ? { name: taskName } : {}),
+                    ...(roleCfg ? { role: roleCfg.name } : {}),
+                  });
+                }
+                if (promptAlreadyDelivered) {
+                  const shouldNotify = params.notify !== false;
+                  if (shouldNotify) startWatcher(id, heartbeatMs);
+                  return emit({
+                    id,
+                    provider,
+                    mode: 'native',
+                    pane: started.pane,
+                    ...(taskName ? { name: taskName } : {}),
+                    ...(roleCfg ? { role: roleCfg.name } : {}),
+                    ...(boardItem ? { boardItem } : {}),
+                    accepted: true,
+                    notify: shouldNotify,
+                  });
+                }
+                if (effectivePrompt !== undefined) {
+                  const delivered = await deliverPrompt(id, effectivePrompt, {
+                    signal,
+                    notify: params.notify !== false,
+                    heartbeatMs,
+                    name: taskName,
+                  });
+                  return emit({
+                    id,
+                    provider,
+                    mode: 'native',
+                    pane: started.pane,
+                    ...(taskName ? { name: taskName } : {}),
+                    ...(roleCfg ? { role: roleCfg.name } : {}),
+                    ...(boardItem ? { boardItem } : {}),
+                    ...delivered,
+                  });
+                }
+                return emit({
+                  id,
+                  provider,
+                  mode: 'native',
+                  pane: started.pane,
+                  ...(taskName ? { name: taskName } : {}),
+                  ...(roleCfg ? { role: roleCfg.name } : {}),
+                  ...(boardItem ? { boardItem } : {}),
+                });
+              }
+            }
+
+            const args = ['start', provider, '--cwd', cwd, '--json'];
+            if (model) args.push('--model', model);
+            if (params.executable) args.push('--executable', params.executable);
+            if (params.pane) {
+              if (!PANES.has(params.pane)) throw new Error(`Unsupported pane: ${params.pane}`);
+              args.push('--pane', params.pane);
+            }
+            if (params.workspace) args.push('--workspace', params.workspace);
+            if (params.tab) args.push('--tab', params.tab);
+            const startedResult = await runPerchCli(args, { signal, timeoutMs: 45000 });
+            if (startedResult.code !== 0) throw new Error(cliErrorMessage(startedResult, 'perch start failed'));
+            const started = parseJson(startedResult.stdout) as { id?: string; provider?: string; pane?: unknown };
+            if (!started?.id) throw new Error('perch start did not return a session ID');
+            const boundItem = commitBoardReservation(started.id);
+            ownedSessions.add(started.id);
+            ensureTask(started.id, {
+              ...(taskName ? { name: taskName } : {}),
+              ...(roleCfg ? { role: roleCfg.name } : {}),
+              provider,
+              mode: 'managed',
+              ...(model ? { model } : {}),
+              cwd,
+              ...(boundItem ? { boardItem: boundItem, boardRoot } : {}),
+              state: 'idle',
+              unhandled: false,
+              error: undefined,
+              heartbeatCount: 0,
             });
-            return emit({ ...started, ...(taskName ? { name: taskName } : {}), ...delivered });
+            updatePerchUi(ctx);
+            if (effectivePrompt !== undefined) {
+              const delivered = await deliverPrompt(started.id, effectivePrompt, {
+                signal,
+                notify: params.notify !== false,
+                heartbeatMs,
+                name: taskName,
+              }).catch(error => {
+                throw new Error(`Session ${started.id} started, but initial send failed: ${error instanceof Error ? error.message : String(error)}`);
+              });
+              return emit({
+                ...started,
+                ...(taskName ? { name: taskName } : {}),
+                ...(roleCfg ? { role: roleCfg.name } : {}),
+                ...(boundItem ? { boardItem: boundItem } : {}),
+                ...delivered,
+              });
+            }
+            return emit({
+              ...started,
+              ...(taskName ? { name: taskName } : {}),
+              ...(roleCfg ? { role: roleCfg.name } : {}),
+              ...(boundItem ? { boardItem: boundItem } : {}),
+            });
+          } catch (error) {
+            failBoardReservation(error instanceof Error ? error.message : String(error));
+            throw error;
           }
-          return emit({ ...started, ...(taskName ? { name: taskName } : {}) });
         }
         if (!params.id) throw new Error(`perch ${params.op} requires id`);
         if (params.op === 'send') {
           const message = params.text ?? params.prompt;
           if (!message || !message.trim()) throw new Error('perch send requires non-empty text');
-          const heartbeatMs = resolveHeartbeatMs(params.heartbeatSeconds);
+          const heartbeatMs = resolveHeartbeatMs(params.heartbeatSeconds, config, perchModeEnabled);
           const taskName = sanitizeName(params.name);
           const delivered = await deliverPrompt(params.id, message, {
             signal,
@@ -916,6 +1564,7 @@ export default function (pi: ExtensionAPI) {
               task.state = parsed.status as TaskState;
               task.finishedAt = Date.now();
               if (typeof parsed.error === 'string') task.error = parsed.error;
+              updatePerchUi(ctx);
             }
             return emit(parsed);
           }
@@ -932,6 +1581,7 @@ export default function (pi: ExtensionAPI) {
           if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch history failed'));
           const task = tasks.get(params.id);
           if (task && task.state !== 'running') task.unhandled = false;
+          updatePerchUi(ctx);
           return emit(parseJson(result.stdout) ?? []);
         }
         if (params.op === 'resume') {
@@ -940,17 +1590,13 @@ export default function (pi: ExtensionAPI) {
           const resumed = parseJson(result.stdout) as { id?: string; provider?: string };
           if (resumed?.id) {
             ownedSessions.add(resumed.id);
-            ensureTask(resumed.id, { provider: resumed.provider ?? resumed.id.split(':', 1)[0], state: 'idle' });
+            ensureTask(resumed.id, { provider: resumed.provider ?? resumed.id.split(':', 1)[0], mode: 'managed', state: 'idle' });
+            updatePerchUi(ctx);
           }
           return emit(resumed);
         }
         if (params.op === 'close') {
-          cancelWatcher(params.id);
-          ownedSessions.delete(params.id);
-          tasks.delete(params.id);
-          const result = await runPerchCli(['close', params.id, '--json'], { signal, timeoutMs: 15000 });
-          if (result.code !== 0) throw new Error(cliErrorMessage(result, 'perch close failed'));
-          return emit(parseJson(result.stdout) ?? { id: params.id, closed: true });
+          return emit(await closeTrackedWorker(params.id, signal));
         }
         throw new Error(`Unsupported perch operation: ${params.op}`);
       },
@@ -958,46 +1604,240 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on('context', (event, ctx) => {
-    if (isManagedWorker) return;
-    const anyCtx = ctx as unknown as { agent?: { kind?: string } };
-    if (anyCtx.agent?.kind === 'sub') return;
-    const active = [...tasks.values()].filter(task => task.state === 'running' || task.unhandled);
-    if (!active.length) {
-      pendingLedgerAck = undefined;
-      return;
-    }
-    const unhandled = active.filter(task => task.unhandled);
-    pendingLedgerAck = unhandled.length ? new Map(unhandled.map(task => [task.id, task.finishSeq])) : undefined;
     const existing = Array.isArray((event as { messages?: unknown[] })?.messages) ? (event as { messages: unknown[] }).messages : [];
-    return {
-      messages: [
-        ...existing,
-        {
+    const additions: Array<Record<string, unknown>> = [];
+
+    if (isSubAgent(ctx)) {
+      if (!turn) {
+        try { turn = captureTurn(ctx as unknown as SessionContext); } catch { return; }
+      }
+      if (!turn) return;
+      watchDecisions(turn.root);
+      const boardCurrent = workerContext(turn.root, turn.worker);
+      if (!boardCurrent) { closeDecisionWatch(); return; }
+      decisionVersion ??= boardCurrent.decisions;
+      turn.attempt ??= boardCurrent.attempt;
+      return {
+        messages: [...existing, {
           role: 'custom' as const,
-          customType: 'perch-task-ledger',
+          customType: 'session-board-current',
+          content: boardCurrent.text,
           display: false,
           attribution: 'agent' as const,
-          content: formatLedger(active, Date.now()),
           timestamp: Date.now(),
-        },
-      ],
-    };
+        }],
+      };
+    }
+
+    if (isManagedWorker) return;
+
+    // 1. Perch active task ledger
+    const active = [...tasks.values()].filter(task => task.state === 'running' || task.unhandled);
+    if (active.length) {
+      const unhandled = active.filter(task => task.unhandled);
+      pendingLedgerAck = unhandled.length ? new Map(unhandled.map(task => [task.id, task.finishSeq])) : undefined;
+      additions.push({
+        role: 'custom' as const,
+        customType: 'perch-task-ledger',
+        display: false,
+        attribution: 'agent' as const,
+        content: formatLedger(active, Date.now()),
+        timestamp: Date.now(),
+      });
+    } else {
+      pendingLedgerAck = undefined;
+    }
+
+    // 2. Session board pending receipt notices
+    const file = safeSessionFile(ctx);
+    const sessionId = ctx.sessionManager.getSessionId();
+    const owner = liveOwner(ctx);
+    if (file && file === previousRoot && mainRoot !== file &&
+        (!owner || (owner.sessionManager.getSessionFile() === file && owner.sessionManager.getSessionId() === sessionId))) {
+      mainRoot = file;
+    }
+    const root = mainRoot ?? file;
+    if (root && file === root && (!owner || (owner.sessionManager.getSessionFile() === root && owner.sessionManager.getSessionId() === sessionId))) {
+      const notices = withBoard(root, store => store.pendingReceiptNotices(), false) ?? [];
+      if (notices.length) {
+        receiptContext = { root, sessionId, owner, notices };
+        const items = [...new Map(notices.map(({ item, attempt }) => [item, { item, attempt }])).values()];
+        additions.push({
+          role: 'custom' as const,
+          customType: 'session-board-receipts',
+          display: false,
+          attribution: 'agent' as const,
+          content: `Board recorded worker returns for these items and attempts: ${JSON.stringify(items)}. Inspect each current item and its evidence; a return does not mean submission or approval.`,
+          timestamp: Date.now(),
+        });
+      } else {
+        receiptContext = undefined;
+      }
+    } else {
+      receiptContext = undefined;
+    }
+
+    // In /perch mode, strip any stale eager-task-prelude injected before /perch was toggled on.
+    const baseMessages = perchModeEnabled
+      ? existing.filter(m => !(m && typeof m === 'object' && (m as { customType?: string }).customType === 'eager-task-prelude'))
+      : existing;
+
+    if (!additions.length && baseMessages.length === existing.length) return;
+    return { messages: [...baseMessages, ...additions] };
   });
 
   pi.on('message_end', (event, ctx) => {
-    if (isManagedWorker || !pendingLedgerAck) return;
-    const anyCtx = ctx as unknown as { agent?: { kind?: string } };
-    if (anyCtx.agent?.kind === 'sub') return;
+    if (isManagedWorker || isSubAgent(ctx)) return;
     const msg = (event as { message?: { role?: string; stopReason?: string } })?.message;
     if (msg?.role !== 'assistant') return;
-    const delivered = pendingLedgerAck;
-    pendingLedgerAck = undefined;
-    if (msg.stopReason !== 'stop') return;
-    for (const [id, seq] of delivered) {
-      const task = tasks.get(id);
-      if (task && task.finishSeq === seq && task.state !== 'running') {
-        task.unhandled = false;
+
+    if (pendingLedgerAck) {
+      const delivered = pendingLedgerAck;
+      pendingLedgerAck = undefined;
+      if (msg.stopReason === 'stop') {
+        for (const [id, seq] of delivered) {
+          const task = tasks.get(id);
+          if (task && task.finishSeq === seq && task.state !== 'running') {
+            task.unhandled = false;
+          }
+        }
+        updatePerchUi(ctx);
       }
+    }
+
+    if (receiptContext) {
+      const delivered = receiptContext;
+      receiptContext = undefined;
+      if (msg.stopReason === 'stop' || msg.stopReason === 'toolUse') {
+        const owner = liveOwner(ctx);
+        const file = safeSessionFile(ctx);
+        if ((mainRoot === delivered.root || file === delivered.root) &&
+            (!delivered.owner || owner === delivered.owner) &&
+            file === delivered.root && ctx.sessionManager.getSessionId() === delivered.sessionId) {
+          try { withBoard(delivered.root, store => store.deliverReceiptNotices(() => {}, delivered.notices), false); } catch {}
+        }
+      }
+    }
+  });
+
+  pi.on('agent_start', () => {
+    pendingSendUntil = 0;
+  });
+
+  pi.on('agent_end', async (event, ctx) => {
+    agentEndSeq = sendSeq;
+    pendingSendUntil = 0;
+
+    if (isSubAgent(ctx)) {
+      if ((event as { willContinue?: boolean })?.willContinue || !turn) return;
+      try { recordTurn(ctx as unknown as SessionContext, turn); } finally { turn = undefined; decisionVersion = undefined; closeDecisionWatch(); }
+      return;
+    }
+    if (isManagedWorker) return;
+
+    const root = safeSessionFile(ctx);
+    if (!root) return;
+    const shouldScan = withBoard(root, store => !!store.activeDiscussion() && !!store.discussionScan(), false);
+    if (shouldScan) {
+      try {
+        const branch = ctx.sessionManager.getBranch() as Array<{ id: string; type: string; message?: { role: string; content?: unknown; stopReason?: string } }>;
+        withBoard(root, store => {
+          const scan = store.discussionScan();
+          if (!scan) return;
+          const start = scan.cursor === null ? -1 : branch.findIndex(entry => entry.id === scan.cursor);
+          if (scan.cursor !== null && start < 0) throw new Error('Discussion transcript cursor is unavailable');
+          let token = scan.token;
+          let cursor = scan.cursor;
+          let cursorToken = scan.token;
+          let users: { id: string; token: string | null }[] = [];
+          for (const entry of branch.slice(start + 1)) {
+            if (entry.type !== 'message' || !entry.message) continue;
+            if (entry.message.role === 'user') {
+              const marker = discussionText(entry.message.content).match(/(?:^|\n)omp-board-discussion:([0-9a-f-]{36})(?:\n|$)/)?.[1];
+              if (marker) token = store.activateDiscussion(marker) ? marker : null;
+              users.push({ id: entry.id, token });
+            } else if (entry.message.role === 'assistant' && entry.message.stopReason === 'stop') {
+              for (const user of users) {
+                if (user.token) store.queueDiscussion(user.token, `${user.id}:${entry.id}`, user.id, entry.id);
+              }
+              users = [];
+              cursor = entry.id;
+              cursorToken = token;
+            }
+          }
+          if (cursor && cursor !== scan.cursor) store.advanceDiscussionScan(cursor, cursorToken);
+        }, false);
+      } catch {
+        ctx.ui?.notify?.('Board discussion scan failed (transcript-or-storage); later turns will retry.', 'warning');
+      }
+    }
+
+    const running = discussionProcessing.get(root);
+    if (running) { running.again = true; return; }
+    const job = { again: false };
+    discussionProcessing.set(root, job);
+    const sessionId = ctx.sessionManager.getSessionId();
+    const anyCtx = ctx as unknown as { model?: unknown; modelRegistry?: unknown; sessionManager: { getEntries?: () => Array<{ id: string; type: string; message?: { role: string; content?: unknown } }> } };
+    const modelContext = {
+      model: anyCtx.model,
+      modelRegistry: anyCtx.modelRegistry,
+      sessionManager: { getSessionId: () => sessionId },
+    } as unknown as DiscussionModelContext;
+    try {
+      do {
+        job.again = false;
+        const pending = withBoard(root, store => store.pendingDiscussions(), false) ?? [];
+        if (!pending.length) break;
+        const entries = new Map((anyCtx.sessionManager.getEntries?.() ?? []).map(entry => [entry.id, entry]));
+        let failed = false;
+        for (const row of pending) {
+          if (withBoard(root, store => store.discussionEnded(row.token), false)) {
+            withBoard(root, store => store.traceDiscussion('skipped-ended', row.token, row.user_entry, row.assistant_entry), false);
+            withBoard(root, store => store.completeDiscussion(row.key), false);
+            continue;
+          }
+          const userEntry = entries.get(row.user_entry);
+          const assistantEntry = entries.get(row.assistant_entry);
+          if (!userEntry || userEntry.type !== 'message' || userEntry.message?.role !== 'user' ||
+              !assistantEntry || assistantEntry.type !== 'message' || assistantEntry.message?.role !== 'assistant') {
+            ctx.ui?.notify?.('Board discussion retry is pending: session message references are unavailable.', 'warning');
+            withBoard(root, store => store.deferDiscussion(row.key), false);
+            continue;
+          }
+          const activeDisc = withBoard(root, store => store.discussion(row.token), false);
+          if (!activeDisc) continue;
+          const originalUser = discussionText(userEntry.message.content);
+          const initial = /(?:^|\n)omp-board-discussion:[0-9a-f-]{36}(?:\n|$)/.test(originalUser);
+          const user = originalUser.replace(/(?:^|\n)omp-board-discussion:[0-9a-f-]{36}(?:\n|$)/, '\n');
+          const assistant = discussionText(assistantEntry.message.content);
+          if (!user.trim() || !assistant.trim()) {
+            ctx.ui?.notify?.('Board discussion retry is pending: session message content is unavailable.', 'warning');
+            withBoard(root, store => store.deferDiscussion(row.key), false);
+            continue;
+          }
+          try {
+            const result = await summarizeDiscussion(modelContext, activeDisc.target, activeDisc.recent, user, assistant, undefined, initial);
+            const recorded = withBoard(root, store => {
+              if (!result.related) { if (!initial) store.clearDiscussion(row.token); }
+              else if (result.summary) store.archiveDiscussion(row.token, row.key, result.summary);
+              store.traceDiscussion(!result.related ? (initial ? 'initial-unrelated' : 'unrelated') :
+                result.summary ? 'archived' : 'empty', row.token, row.user_entry, row.assistant_entry);
+              store.completeDiscussion(row.key);
+              return true;
+            }, false);
+            if (!recorded) throw new Error('Board is unavailable');
+          } catch (error) {
+            const reason = error instanceof DiscussionFailure ? `${error.stage}:${error.category}` : 'storage-or-runtime';
+            try { withBoard(root, store => store.traceDiscussion(`failure:${reason}`, row.token, row.user_entry, row.assistant_entry), false); } catch {}
+            ctx.ui?.notify?.(`Board discussion archive pending (${reason}); it will retry on a later turn.`, 'warning');
+            failed = true;
+            break;
+          }
+        }
+        if (failed) break;
+      } while (job.again && safeSessionFile(ctx) === root);
+    } finally {
+      discussionProcessing.delete(root);
     }
   });
 
@@ -1005,12 +1845,142 @@ export default function (pi: ExtensionAPI) {
     const state = (event as { state?: { vibe?: { status?: string } } })?.state;
     if (state?.vibe?.status === 'active') await ensureToolActiveInVibe(ctx);
   });
-  pi.on('before_agent_start', async (_event, ctx) => {
+
+  pi.on('before_agent_start', async (event, ctx) => {
+    const ev = event as { reason?: string; prompt?: string; systemPrompt?: string | string[] };
+    if (isSubAgent(ctx)) {
+      if (ev.reason === 'revive') return;
+      const token = promptSpawnToken(ev.prompt ?? '');
+      let root: string;
+      try { root = rootSession(ctx as unknown as SessionContext); }
+      catch (error) {
+        if (token) { (ctx as unknown as { abort?: () => void }).abort?.(); throw error; }
+        return;
+      }
+      try {
+        if (token) await awaitSpawn(root, token, currentAgentId(ctx));
+        turn = captureTurn(ctx as unknown as SessionContext);
+        if (!turn) {
+          if (token) throw new Error('Board spawn did not start in the expected child session.');
+          return;
+        }
+        watchDecisions(turn.root);
+        const boardCurrent = workerContext(turn.root, turn.worker);
+        if (!boardCurrent) {
+          closeDecisionWatch();
+          if (token) throw new Error('Board spawn has no committed binding.');
+          return;
+        }
+        decisionVersion = boardCurrent.decisions;
+        turn.attempt ??= boardCurrent.attempt;
+        return { message: { customType: 'session-board-work', content: boardCurrent.text, display: false, attribution: 'agent' } };
+      } catch (error) {
+        if (token) (ctx as unknown as { abort?: () => void }).abort?.();
+        throw error;
+      }
+    }
+
     await ensureToolActiveInVibe(ctx);
+    if (isManagedWorker) return;
+
+    const config = loadPerchConfig({ cwd: ctx.cwd });
+    if (perchModeEnabled) {
+      await syncPerchTools(ctx, config);
+    }
+
+    const file = safeSessionFile(ctx);
+    if (file && mainRoot !== file && (!mainRoot || file === previousRoot)) {
+      const owner = liveOwner(ctx);
+      if (!owner || (owner.sessionManager.getSessionFile() === file && owner.sessionManager.getSessionId() === ctx.sessionManager.getSessionId())) {
+        mainRoot = file;
+      }
+    }
+    if (file && ev.reason !== 'revive') {
+      const token = (ev.prompt ?? '').match(/(?:^|\n)omp-board-discussion:([0-9a-f-]{36})(?:\n|$)/)?.[1];
+      const activeDisc = withBoard(file, store => store.activeDiscussion(), false);
+      if (token || activeDisc) {
+        const branch = ctx.sessionManager.getBranch() as Array<{ id: string; type: string; message?: { role: string; stopReason?: string } }>;
+        const userIndex = branch.findLastIndex(entry => entry.type === 'message' && entry.message?.role === 'user');
+        const previous = branch.slice(0, userIndex < 0 ? branch.length : userIndex).findLast(entry =>
+          entry.type === 'message' && entry.message?.role === 'assistant' && entry.message.stopReason === 'stop');
+        withBoard(file, store => {
+          store.startDiscussionScan(previous?.id ?? null, activeDisc?.token ?? null);
+          if (token) store.activateDiscussion(token);
+        }, false);
+      }
+    }
+
+    let nextSystemPrompt: string[] | undefined;
+    if (perchModeEnabled) {
+      const base = Array.isArray(ev.systemPrompt) ? ev.systemPrompt : typeof ev.systemPrompt === 'string' ? [ev.systemPrompt] : [];
+      nextSystemPrompt = [...base, renderPerchSystemPrompt(config, { cwd: ctx.cwd })];
+    }
+
+    let boardMessage: { customType: string; content: string; display: boolean; attribution: 'agent' } | undefined;
+    const vibeActive = (ctx as unknown as { sessionModes?: { getState?: () => { vibe?: { status?: string } } } })?.sessionModes?.getState?.()?.vibe?.status === 'active';
+    if (file && (existsSync(boardPath(file)) || vibeActive || (perchModeEnabled && config.board.enabled))) {
+      const snapshot = withBoard(file, store => store.snapshot(), false) ?? { items: [], decisions: [] };
+      if (snapshot.items.length || snapshot.decisions.length || vibeActive) {
+        boardMessage = {
+          customType: 'session-board-guide',
+          content: managerGuidance(snapshot),
+          display: false,
+          attribution: 'agent',
+        };
+      }
+    }
+
+    if (!nextSystemPrompt && !boardMessage) return;
+    return {
+      ...(nextSystemPrompt ? { systemPrompt: nextSystemPrompt } : {}),
+      ...(boardMessage ? { message: boardMessage } : {}),
+    };
   });
 
   pi.on('session_start', async (_event, ctx) => {
     await ensureToolActiveInVibe(ctx);
+
+    if (isSubAgent(ctx)) {
+      const anyCtx = ctx as unknown as { setInterval?: (fn: () => void, ms: number) => void };
+      anyCtx.setInterval?.(() => {
+        if (ctx.isIdle() || !turn || !decisionWatch || decisionWatch.root !== turn.root) return;
+        const version = decisionWatch.store.dataVersion();
+        if (version === decisionWatch.version) return;
+        const decisions = workerDecisionVersion(decisionWatch.store, turn.worker);
+        decisionWatch.version = version;
+        if (decisionVersion === undefined) { decisionVersion = decisions; return; }
+        if (decisionVersion === decisions) return;
+        decisionVersion = decisions;
+        anyPi.sendMessage?.({
+          customType: 'session-board-decisions', display: false, attribution: 'agent',
+          content: 'Related effective board decisions changed. If tools are permitted, use board op=snapshot to inspect them and record important confirmed or ruled out findings and next steps with board op=progress and handoff=true. Respect explicit task and higher-priority tool restrictions.',
+        }, { deliverAs: 'aside' });
+      }, 1000);
+    } else if (!isManagedWorker) {
+      mainRoot = safeSessionFile(ctx);
+      recoverBoard(mainRoot, 'Session restarted before spawn completed.');
+      unsubscribeRegistry?.();
+      const reg = anyPi.pi?.AgentRegistry?.global?.();
+      if (reg && typeof reg.onChange === 'function') {
+        unsubscribeRegistry = reg.onChange(event => {
+          if (!mainRoot || (event.type !== 'removed' && !(event.type === 'status_changed' && event.ref.status === 'aborted'))) return;
+          const ref = event.ref;
+          if (ref.kind !== 'sub' || ref.sessionFile !== join(mainRoot.slice(0, -6), `${ref.id}.jsonl`)) return;
+          const owner = liveOwner(ctx);
+          if (owner && owner.sessionManager.getSessionFile() !== mainRoot) return;
+          try {
+            withBoard(mainRoot, store => store.releaseWorker(ref.id, 'Worker is no longer available.'), false);
+          } catch (error) {
+            ctx.ui?.notify?.(`Board could not release unavailable worker ${ref.id}: ${String(error)}`, 'warning');
+          }
+        });
+      }
+      const config = loadPerchConfig({ cwd: ctx.cwd });
+      perchModeEnabled = restorePerchModeFromBranch(ctx, config);
+      await syncPerchTools(ctx, config);
+      updatePerchUi(ctx);
+    }
+
     if (ctx.mode !== 'tui' && ctx.mode !== 'rpc') return;
     try {
       mkdirSync(dir, { mode: 0o700 });
@@ -1050,9 +2020,16 @@ export default function (pi: ExtensionAPI) {
             if (!('id' in req) || req.id !== id) throw new Error('Session identity changed');
             if (req.op === 'send') {
               if (!('text' in req) || typeof req.text !== 'string' || !req.text || Buffer.byteLength(req.text) > 512 * 1024) throw new Error('Invalid message');
+              sendSeq += 1;
+              pendingSendUntil = Date.now() + SEND_BUSY_GRACE_MS;
               const admission = pi.sendUserMessage(req.text, { deliverAs: 'steer' });
               admissions.add(admission);
-              try { await admission; } finally { admissions.delete(admission); }
+              try { await admission; }
+              catch (error) {
+                agentEndSeq = sendSeq;
+                pendingSendUntil = 0;
+                throw error;
+              } finally { admissions.delete(admission); }
               socket.end(JSON.stringify({ ok: true }) + '\n');
               return;
             }
@@ -1099,18 +2076,58 @@ export default function (pi: ExtensionAPI) {
       server.listen(path, () => { try { chmodSync(path, 0o600); } catch { pause(); server?.close(); } });
     } catch { pause(); }
   });
-  pi.on('session_before_switch', pauseAndDrain);
-  pi.on('session_switch', (_event, ctx) => { if (!stopping && server?.listening) activate(ctx); });
+
+  pi.on('session_before_switch', async (_event, ctx) => {
+    if (!isSubAgent(ctx) && !isManagedWorker) {
+      if (mainRoot) previousRoot = mainRoot;
+      mainRoot = undefined;
+      receiptContext = undefined;
+      closeWeb();
+      const ui = (ctx as unknown as { ui?: { setStatus?: (k: string, v: string | undefined) => void } }).ui;
+      ui?.setStatus?.('board', undefined);
+      ui?.setStatus?.('perch', undefined);
+    }
+    await pauseAndDrain();
+  });
+
+  pi.on('session_switch', async (event, ctx) => {
+    if (!stopping && server?.listening) activate(ctx);
+    if (!isSubAgent(ctx) && !isManagedWorker) {
+      receiptContext = undefined;
+      mainRoot = safeSessionFile(ctx);
+      recoverBoard((event as { previousSessionFile?: string })?.previousSessionFile, 'Session switched before spawn completed.');
+      recoverBoard(mainRoot, 'Session resumed before spawn completed.');
+      const config = loadPerchConfig({ cwd: ctx.cwd });
+      perchModeEnabled = restorePerchModeFromBranch(ctx, config);
+      await syncPerchTools(ctx, config);
+      updatePerchUi(ctx);
+    }
+  });
+
   pi.on('session_before_branch', pauseAndDrain);
   pi.on('session_branch', (_event, ctx) => { if (!stopping && server?.listening) activate(ctx); });
   pi.on('session_before_tree', pauseAndDrain);
   pi.on('session_tree', (_event, ctx) => { if (!stopping && server?.listening) activate(ctx); });
-  pi.on('session_shutdown', async () => {
+
+  pi.on('session_shutdown', async (_event, ctx) => {
+    if (isSubAgent(ctx)) {
+      closeDecisionWatch();
+      return;
+    }
     stopping = true;
     await pauseAndDrain();
+    mainRoot = undefined;
+    previousRoot = undefined;
+    receiptContext = undefined;
+    closeWeb();
+    unsubscribeRegistry?.();
+    unsubscribeRegistry = undefined;
+    recoverBoard(safeSessionFile(ctx), 'Session shut down before spawn completed.');
+
     const toClose = [...ownedSessions];
     ownedSessions.clear();
     tasks.clear();
+    rightPaneStack.length = 0;
     if (toClose.length) {
       await Promise.allSettled(toClose.map(id => runPerchCli(['close', id, '--json'], { timeoutMs: 3000 }).catch(() => {})));
     }

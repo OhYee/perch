@@ -16,6 +16,8 @@
     "update.mjs",
     "version.mjs",
     "omp-extension.ts",
+    "perch-config.ts",
+    "board/",
     "adapters/",
     "SECURITY.md",
     "CONTRIBUTING.md",

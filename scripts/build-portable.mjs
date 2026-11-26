@@ -24,7 +24,22 @@ const build = async options => {
   return result;
 };
 const common = { root, format: 'esm', sourcemap: 'none', env: 'disable', minify: { whitespace: true, syntax: true } };
-const extension = await build({ ...common, target: 'node', entrypoints: [join(root, 'omp-extension.ts')] });
+const [boardHtml, boardCss, boardJs] = await Promise.all([
+  readFile(join(root, 'board/assets/board-web.html'), 'utf8'),
+  readFile(join(root, 'board/assets/board-web.css'), 'utf8'),
+  readFile(join(root, 'board/assets/board-web.js'), 'utf8'),
+]);
+const extension = await build({
+  ...common,
+  target: 'node',
+  entrypoints: [join(root, 'omp-extension.ts')],
+  external: ['bun:sqlite', '@oh-my-pi/pi-ai'],
+  define: {
+    __PERCH_BOARD_HTML__: JSON.stringify(boardHtml),
+    __PERCH_BOARD_CSS__: JSON.stringify(boardCss),
+    __PERCH_BOARD_JS__: JSON.stringify(boardJs),
+  },
+});
 if (extension.outputs.length !== 1) throw new Error('Expected one bundled OMP extension');
 const wsDir = dirname(createRequire(import.meta.url).resolve('ws/package.json'));
 const licenses = `/*\n${await readFile(join(root, 'LICENSE'), 'utf8')}\nws:\n${await readFile(join(wsDir, 'LICENSE'), 'utf8')}\n*/\n`;

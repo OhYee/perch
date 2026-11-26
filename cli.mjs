@@ -78,6 +78,15 @@ async function adapter(name) {
 }
 
 function validatePaneOptions(values) {
+  if (values.split !== undefined && !['right', 'down'].includes(values.split)) {
+    throw Error(tr('--split must be right or down', '--split 必须是 right 或 down'));
+  }
+  if (values.target !== undefined && (!values.target.trim() || values.target.startsWith('-') || /[\x00-\x1f\x7f-\x9f]/u.test(values.target))) {
+    throw Error(tr('--target requires a valid pane ID', '--target 需要有效的窗格 ID'));
+  }
+  if ((values.split !== undefined || values.target !== undefined) && values.pane !== 'right') {
+    throw Error(tr('--split and --target require --pane right', '--split 和 --target 需要 --pane right'));
+  }
   if (values.pane === undefined) {
     if (values.workspace !== undefined || values.tab !== undefined) throw Error(tr('--workspace and --tab require --pane tern, tmux, or herdr', '--workspace 和 --tab 需要 --pane tern、tmux 或 herdr'));
     return;
@@ -150,6 +159,28 @@ function nativeYoloArgs(provider, providerArgs) {
 }
 
 async function launchPane(values, session, provider, cwd, nativeExecutable, initialPrompt, providerArgs = []) {
+  if (nativeExecutable && values.pane === 'right' && values.target !== undefined) {
+    const direction = values.split ?? 'down';
+    const command = ['/usr/bin/env', ...nativeEnvironment(provider), nativeExecutable, ...nativeYoloArgs(provider, providerArgs)];
+    if (values.model !== undefined) command.push('--model', values.model);
+    command.push(...providerArgs);
+    if (initialPrompt !== undefined) {
+      if (provider === 'agy') command.push(`--prompt-interactive=${initialPrompt}`);
+      else command.push('--', initialPrompt);
+    }
+    let stdout;
+    try {
+      ({ stdout } = await promisify(execFile)('tern', ['split', values.target, direction, '--cwd', cwd, '--json', '--', ...command], { maxBuffer: 1024 * 1024 }));
+    } catch (error) {
+      throw Error(String(error.stderr || error.message).trim());
+    }
+    let result;
+    try { result = JSON.parse(stdout); } catch { throw Error('Invalid tern split response'); }
+    if (!result || !['string', 'number'].includes(typeof result.block) || !String(result.block)) {
+      throw Error('Invalid tern split response');
+    }
+    return { backend: 'tern', id: result.block };
+  }
   const args = ['--mode', 'right'];
   if (values.pane !== 'right') args.push('--backend', values.pane, '--session', values.workspace, '--tab', values.tab);
   if (nativeExecutable) {
@@ -348,7 +379,7 @@ async function run([command, ...args]) {
   else if (command === 'history') Object.assign(options, { limit: opt('string'), all: opt() });
   else if (command === 'send') options.stdin = opt();
   else if (command === 'input') Object.assign(options, { key: opt('string'), enter: opt() });
-  else if (command === 'start') Object.assign(options, { cwd: opt('string'), model: opt('string'), executable: opt('string'), native: opt(), pane: opt('string'), workspace: opt('string'), tab: opt('string') });
+  else if (command === 'start') Object.assign(options, { cwd: opt('string'), model: opt('string'), executable: opt('string'), native: opt(), pane: opt('string'), split: opt('string'), target: opt('string'), workspace: opt('string'), tab: opt('string') });
   else if (command === 'wait') options.timeout = opt('string');
   else if (!['resume', 'close', 'integration', 'view', 'version', 'update'].includes(command)) throw Error(tr(`Unknown command: ${quote(command)}\n${rootHelp}`, `未知命令：${quote(command)}\n${rootHelp}`));
   let values, positionals;
