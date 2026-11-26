@@ -734,18 +734,21 @@ export default function (pi: ExtensionAPI) {
     return config;
   }
 
-  async function withNativeLaunchLock<T>(provider: string, fn: () => Promise<T>): Promise<T> {
-    const previous = nativeLaunchChains.get(provider) ?? Promise.resolve();
+  // Native pane launches share ONE global chain (not per-provider): the right-side stack target is global,
+  // so concurrent omp + agy starts must not both see an empty stack and each split the main pane horizontally.
+  async function withNativeLaunchLock<T>(_provider: string, fn: () => Promise<T>): Promise<T> {
+    const lockKey = 'native-pane-layout';
+    const previous = nativeLaunchChains.get(lockKey) ?? Promise.resolve();
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const next = previous.then(() => gate);
-    nativeLaunchChains.set(provider, next);
+    nativeLaunchChains.set(lockKey, next);
     await previous;
     try {
       return await fn();
     } finally {
       release();
-      if (nativeLaunchChains.get(provider) === next) nativeLaunchChains.delete(provider);
+      if (nativeLaunchChains.get(lockKey) === next) nativeLaunchChains.delete(lockKey);
     }
   }
 
