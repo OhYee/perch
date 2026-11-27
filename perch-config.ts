@@ -100,6 +100,45 @@ function stripInlineComment(raw: string): string {
   return raw.trimEnd();
 }
 
+function splitFlow(inner: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: '"' | "'" | null = null;
+  let start = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (quote) {
+      if (quote === '"' && ch === '\\') { i++; continue; }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === '[' || ch === '{') depth++;
+    else if (ch === ']' || ch === '}') depth--;
+    else if (ch === ',' && depth === 0) { parts.push(inner.slice(start, i)); start = i + 1; }
+  }
+  const last = inner.slice(start);
+  if (last.trim()) parts.push(last);
+  return parts;
+}
+
+/** YAML flow collections such as `[a, b]` and `{ k: v }` (the forms people write in config.yml). */
+function parseFlow(value: string): unknown | undefined {
+  const open = value[0];
+  const close = value[value.length - 1];
+  if (!((open === '[' && close === ']') || (open === '{' && close === '}'))) return undefined;
+  const inner = value.slice(1, -1).trim();
+  const parts = inner ? splitFlow(inner) : [];
+  if (open === '[') return parts.map(part => parseYamlScalar(part));
+  const out: Record<string, unknown> = {};
+  for (const part of parts) {
+    const kv = splitKeyValue(part.trim());
+    if (!kv) return undefined;
+    out[String(parseYamlScalar(kv[0]))] = parseYamlScalar(kv[1]);
+  }
+  return out;
+}
+
 function parseYamlScalar(raw: string): unknown {
   const value = stripInlineComment(raw).trim();
   if (!value || value === 'null' || value === '~') return null;
@@ -112,6 +151,8 @@ function parseYamlScalar(raw: string): unknown {
     return value.slice(1, -1).replaceAll("''", "'");
   }
   if ((value.startsWith('[') && value.endsWith(']')) || (value.startsWith('{') && value.endsWith('}'))) {
+    const flow = parseFlow(value);
+    if (flow !== undefined) return flow;
     try { return JSON.parse(value); } catch { /* fall through */ }
   }
   if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) {
