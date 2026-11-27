@@ -269,8 +269,18 @@ header.hero{
 
 .mockup-grid{
   display:grid;grid-template-columns:1.12fr 1fr;height:560px;
+  transition:grid-template-columns .6s cubic-bezier(.4,0,.2,1);
 }
-.win-stack{display:grid;grid-template-rows:1fr 1fr;min-width:0;min-height:0}
+.mockup-grid[data-workers="0"]{grid-template-columns:1fr 0fr}
+.win-stack{
+  display:grid;grid-template-rows:1fr 1fr;min-width:0;min-height:0;overflow:hidden;
+  transition:grid-template-rows .6s cubic-bezier(.4,0,.2,1);
+}
+.mockup-grid[data-workers="1"] .win-stack{grid-template-rows:1fr 0fr}
+.mockup-grid[data-workers="0"] .win-director{border-right-color:transparent}
+.mockup-grid:not([data-workers="2"]) .win-stack .agent-win:first-child{border-bottom-color:transparent}
+.agent-win.is-off{opacity:0;visibility:hidden}
+.win-stack .agent-win{transition:opacity .45s ease .25s,box-shadow .35s}
 .agent-win{
   display:flex;flex-direction:column;min-width:0;min-height:0;
   background:var(--term-bg);position:relative;
@@ -609,7 +619,9 @@ footer{
 
 @media (max-width:860px){
   .mockup-grid,.grid-2,.rules-grid,.role-grid,.sop-body,.tier-cards,.limits-grid{grid-template-columns:1fr}
-  .mockup-grid{height:auto}
+  .mockup-grid,.mockup-grid[data-workers]{grid-template-columns:1fr;height:auto}
+  .mockup-grid[data-workers="0"] .win-stack{display:none}
+  .mockup-grid[data-workers="1"] #winNeon{display:none}
   .win-director{height:400px;border-right:none;border-bottom:1px solid var(--term-line)}
   .win-stack .agent-win{height:300px}
   .scroll-hint{display:block}
@@ -683,7 +695,7 @@ footer{
           <span class="mbadge board" id="demoBoard">/board · 2 updates</span>
         </div>
       </div>
-      <div class="mockup-grid">
+      <div class="mockup-grid" id="demoGrid" data-workers="2">
         <div class="agent-win win-director" id="winDirector">
           <div class="win-hd"><span class="win-logo omp">omp</span><span class="win-name">主控</span><span class="win-meta">/perch 模式 · gpt-6.2-sol</span><span class="wstate wait" data-state>等您拍板</span></div>
           <div class="win-body">
@@ -706,7 +718,7 @@ footer{
             <div class="ln-text" data-at="19">决策：P1 交回原开发 worker 修复，P2 合并后跟进。需要您确认是否开始修复？</div>
           </div>
           <div class="win-input"><span class="caret">›</span><span id="dirInput"><span class="ph">输入需求…</span></span></div>
-          <div class="win-status">tools: perch · board · read · ask │ workers 2 │ ctx 9%</div>
+          <div class="win-status">tools: perch · board · read · ask │ ctx 9%</div>
         </div>
         <div class="win-stack">
           <div class="agent-win" id="winSol">
@@ -1762,6 +1774,7 @@ review 当前分支相对主干的改动，高风险的地方请两个模型分�
       neon: document.getElementById('winNeon')
     };
     var flow = document.getElementById('demoFlow');
+    var grid = document.getElementById('demoGrid');
     var input = document.getElementById('dirInput');
     var workersBadge = document.getElementById('demoWorkers');
     var boardBadge = document.getElementById('demoBoard');
@@ -1845,6 +1858,9 @@ review 当前分支相对主干的改动，高风险的地方请两个模型分�
       setState(wins.dir, 'idle', 'idle');
       setState(wins.sol, 'idle', '未启动');
       setState(wins.neon, 'idle', '未启动');
+      grid.setAttribute('data-workers', '0');
+      wins.sol.classList.add('is-off');
+      wins.neon.classList.add('is-off');
       workersBadge.textContent = '0 workers';
       boardBadge.textContent = '/board · 0 updates';
       setPhase(0);
@@ -1869,9 +1885,15 @@ review 当前分支相对主干的改动，高风险的地方请两个模型分�
         reveal(2); setState(wins.dir, 'run', '拆分中');
         await sleep(900, my); reveal(3);
         await sleep(900, my); setPhase(1); reveal(4);
-        packet(body(wins.dir), body(wins.sol), 'perch start'); bump(workersBadge, '1 worker');
-        await sleep(500, my); reveal(5);
-        packet(body(wins.dir), body(wins.neon), 'perch start'); bump(workersBadge, '2 workers');
+        // First worker splits a pane to the right of the director.
+        grid.setAttribute('data-workers', '1'); wins.sol.classList.remove('is-off');
+        setState(wins.sol, 'idle', '启动中'); bump(workersBadge, '1 worker');
+        await sleep(650, my); packet(body(wins.dir), body(wins.sol), 'perch start');
+        await sleep(900, my); reveal(5);
+        // Second worker stacks below the first one.
+        grid.setAttribute('data-workers', '2'); wins.neon.classList.remove('is-off');
+        setState(wins.neon, 'idle', '启动中'); bump(workersBadge, '2 workers');
+        await sleep(650, my); packet(body(wins.dir), body(wins.neon), 'perch start');
         await sleep(700, my); reveal(6); setState(wins.dir, 'wait', '等待回推');
         await sleep(400, my);
         pulse(wins.sol, 'pulse'); pulse(wins.neon, 'pulse'); reveal(7);
