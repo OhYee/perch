@@ -1502,19 +1502,20 @@ export default function (pi: ExtensionAPI) {
     const controller = new AbortController();
     reviewControllers.add(controller);
     try {
+      const sessionFile = role.reviewSessionFile ? safeSessionFile(ctx) : undefined;
       const prompt = [
         `[Perch review request — role: ${role.name}${role.label ? ` / ${role.label}` : ''}]`,
-        'You are a reviewer, not the director. Review ONLY the director reply below through this lens: '
-          + `${role.capabilities ?? role.label ?? role.name}.`,
+        ...(role.capabilities ? [`Role capabilities: ${role.capabilities}`] : []),
         ...(role.constraints ? [`Constraints: ${role.constraints}`] : []),
+        ...(role.promptPrefix ? [role.promptPrefix] : []),
         ...(role.reviewPrompt ? [`Review criteria:\n${role.reviewPrompt}`] : []),
-        'Do not modify files, run commands, or add facts. If no change is needed, reply with exactly: OK',
-        'Otherwise reply with concise, concrete suggestions the director can apply directly (at most about 1200 characters).',
+        'If no follow-up to the director is needed, reply with exactly: OK',
+        ...(sessionFile ? ['', '[Session file]', sessionFile] : []),
         '',
         '[User request]',
         clipText(lastUserPrompt || '(unavailable)', 2000).text,
         '',
-        '[Director reply to review]',
+        '[Director reply]',
         clipText(replyText, 12000).text,
       ].join('\n');
 
@@ -1545,9 +1546,7 @@ export default function (pi: ExtensionAPI) {
       const clipped = clipText(reply, MAX_NOTIFICATION_CHARS);
       pushAgentEvent('perch-review-note', [
         `[Perch review: ${role.name}] (${role.reviewMode})`,
-        'Reviewer suggestions for your last reply:',
         clipped.text,
-        'Action: apply the suggestions that improve the reply (expression and structure only; keep facts and evidence unchanged). Then output ONLY the complete revised reply for the user — do not mention this review, the reviewer, or what you changed. Ignore suggestions you disagree with.',
       ].join('\n'), { role: role.name, mode: role.reviewMode, reviewer: id });
     } catch (error) {
       if (stopping || controller.signal.aborted) return;

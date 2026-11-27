@@ -29,26 +29,32 @@ perch:
       provider: omp
       reviewMode: agent-end
       reviewMinChars: 500
+      reviewSessionFile: true
       reviewPrompt: "Conclusion first. Two tables only for status reports."
     b:
       provider: omp
       reviewMode: turn
+      reviewSessionFile: false
     c:
       provider: omp
       reviewMode: sometimes
       reviewMinChars: -3
+      reviewSessionFile: "yes"
 `);
   const cfg = loadPerchConfig({ cwd: root, env: { HOME: home } });
   assert.equal(cfg.roles.a.reviewMode, 'agent-end');
   assert.equal(cfg.roles.a.reviewMinChars, 500);
+  assert.equal(cfg.roles.a.reviewSessionFile, true);
   assert.equal(cfg.roles.a.reviewPrompt, 'Conclusion first. Two tables only for status reports.');
   assert.equal(cfg.roles.b.reviewPrompt, undefined);
   assert.equal(cfg.roles.b.reviewMode, 'turn');
+  assert.equal(cfg.roles.b.reviewSessionFile, false);
   assert.equal(cfg.roles.c.reviewMode, undefined);
   assert.equal(cfg.roles.c.reviewMinChars, undefined);
+  assert.equal(cfg.roles.c.reviewSessionFile, undefined);
 });
 
-async function createReviewHarness(t, rolesYaml) {
+async function createReviewHarness(t, rolesYaml, { sessionFile } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'perch-review-run-'));
   const home = join(root, 'home');
   const cwd = join(root, 'work');
@@ -96,7 +102,7 @@ process.stdin.on('end', () => {
     sessionModes: { getState: () => ({ vibe: { status: 'inactive' } }) },
     isIdle: () => true,
     hasPendingMessages: () => false,
-    sessionManager: { getSessionId: () => 'review-main', getSessionFile: () => undefined, getBranch: () => [], getEntries: () => [] },
+    sessionManager: { getSessionId: () => 'review-main', getSessionFile: () => sessionFile, getBranch: () => [], getEntries: () => [] },
     hasUI: true,
     ui: { notify() {}, setStatus() {} },
   };
@@ -165,7 +171,9 @@ test('a role with reviewMode reviews the director reply, pushes suggestions once
   assert.match(send.stdin, /long unstructured explanation/);
   assert.match(send.stdin, /readability of replies/);
   assert.match(send.stdin, /Review criteria:\nConclusion first; short paragraphs\./);
-  assert.match(note.message.content, /output ONLY the complete revised reply/i);
+  assert.doesNotMatch(send.stdin, /\[Session file\]/);
+  assert.doesNotMatch(send.stdin, /Do not modify files|Review ONLY/i);
+  assert.doesNotMatch(note.message.content, /output ONLY the complete revised reply/i);
 
   // 3. The revision that answers the review note is not reviewed again
   const sendsBefore = first.filter(c => c.args[0] === 'send').length;
@@ -227,3 +235,50 @@ test('turn mode reviews each assistant message with text, agent-end roles only r
 async function handlers_agentEnd(h) {
   await h.handlers.get('agent_end')({}, h.ctx);
 }
+
+test('reviewSessionFile includes the main session jsonl path only when enabled and persisted, and forwards promptPrefix', async t => {
+  const sessionFile = '/tmp/perch-test-main-session.jsonl';
+  const h = await createReviewHarness(t, `    reflector:
+      provider: omp
+      model: turn/model
+      capabilities: check skill compliance
+      promptPrefix: Inspect the session transcript and referenced SKILL.md files.
+      reviewMode: agent-end
+      reviewSessionFile: true
+      reviewMinChars: 10
+    plain:
+      provider: omp
+      model: end/model
+      capabilities: plain check
+      reviewMode: agent-end
+      reviewSessionFile: false
+      reviewMinChars: 10`, { sessionFile });
+  await writeFile(h.replyFile, 'OK');
+
+  await h.finishRun('Completed the deployment check and summarized the findings.');
+  await until(async () => (await h.calls()).filter(c => c.args[0] === 'send').length === 2);
+  const sends = (await h.calls()).filter(c => c.args[0] === 'send');
+  const reflectorSend = sends.find(c => /check skill compliance/.test(c.stdin));
+  const plainSend = sends.find(c => /plain check/.test(c.stdin));
+  assert.ok(reflectorSend);
+  assert.ok(plainSend);
+  assert.match(reflectorSend.stdin, /Inspect the session transcript and referenced SKILL\.md files\./);
+  assert.match(reflectorSend.stdin, new RegExp(`\\[Session file\\]\\n${sessionFile.replaceAll('/', '\\/')}`));
+  assert.doesNotMatch(plainSend.stdin, /\[Session file\]/);
+});
+
+test('reviewSessionFile omits [Session file] cleanly when the main session is not persisted', async t => {
+  const h = await createReviewHarness(t, `    reflector:
+      provider: omp
+      model: turn/model
+      capabilities: check skill compliance
+      reviewMode: agent-end
+      reviewSessionFile: true
+      reviewMinChars: 10`);
+  await writeFile(h.replyFile, 'OK');
+
+  await h.finishRun('Completed the deployment check without a persisted session file.');
+  await until(async () => (await h.calls()).filter(c => c.args[0] === 'send').length === 1);
+  const send = (await h.calls()).find(c => c.args[0] === 'send');
+  assert.doesNotMatch(send.stdin, /\[Session file\]/);
+});
