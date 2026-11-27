@@ -20,6 +20,8 @@ export type PerchRoleConfig = {
   reviewMode?: 'turn' | 'agent-end';
   /** Skip automatic review for replies shorter than this many characters. */
   reviewMinChars?: number;
+  /** Detailed review criteria sent to the reviewer in addition to `capabilities` (only used with reviewMode). */
+  reviewPrompt?: string;
 };
 
 export type PerchBoardConfig = {
@@ -399,6 +401,7 @@ function parseRoleEntry(name: string, raw: unknown, modelRoles: Record<string, s
     ...(typeof obj.constraints === 'string' && obj.constraints.trim() ? { constraints: obj.constraints.trim() } : {}),
     ...(typeof obj.promptPrefix === 'string' && obj.promptPrefix.trim() ? { promptPrefix: obj.promptPrefix.trim() } : {}),
     ...(obj.reviewMode === 'turn' || obj.reviewMode === 'agent-end' ? { reviewMode: obj.reviewMode } : {}),
+    ...(typeof obj.reviewPrompt === 'string' && obj.reviewPrompt.trim() ? { reviewPrompt: obj.reviewPrompt.trim().slice(0, 4000) } : {}),
     ...(typeof obj.reviewMinChars === 'number' && Number.isSafeInteger(obj.reviewMinChars) && obj.reviewMinChars >= 0 && obj.reviewMinChars <= 100000
       ? { reviewMinChars: obj.reviewMinChars } : {}),
   };

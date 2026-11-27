@@ -1472,6 +1472,7 @@ export default function (pi: ExtensionAPI) {
         'You are a reviewer, not the director. Review ONLY the director reply below through this lens: '
           + `${role.capabilities ?? role.label ?? role.name}.`,
         ...(role.constraints ? [`Constraints: ${role.constraints}`] : []),
+        ...(role.reviewPrompt ? [`Review criteria:\n${role.reviewPrompt}`] : []),
         'Do not modify files, run commands, or add facts. If no change is needed, reply with exactly: OK',
         'Otherwise reply with concise, concrete suggestions the director can apply directly (at most about 1200 characters).',
         '',
@@ -1511,7 +1512,7 @@ export default function (pi: ExtensionAPI) {
         `[Perch review: ${role.name}] (${role.reviewMode})`,
         'Reviewer suggestions for your last reply:',
         clipped.text,
-        'Action: apply the suggestions that improve the reply (expression and structure only; keep facts and evidence unchanged), then reply to the user once more. Ignore suggestions you disagree with.',
+        'Action: apply the suggestions that improve the reply (expression and structure only; keep facts and evidence unchanged). Then output ONLY the complete revised reply for the user — do not mention this review, the reviewer, or what you changed. Ignore suggestions you disagree with.',
       ].join('\n'), { role: role.name, mode: role.reviewMode, reviewer: id });
     } catch (error) {
       if (stopping || controller.signal.aborted) return;

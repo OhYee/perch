@@ -29,6 +29,7 @@ perch:
       provider: omp
       reviewMode: agent-end
       reviewMinChars: 500
+      reviewPrompt: "Conclusion first. Two tables only for status reports."
     b:
       provider: omp
       reviewMode: turn
@@ -40,6 +41,8 @@ perch:
   const cfg = loadPerchConfig({ cwd: root, env: { HOME: home } });
   assert.equal(cfg.roles.a.reviewMode, 'agent-end');
   assert.equal(cfg.roles.a.reviewMinChars, 500);
+  assert.equal(cfg.roles.a.reviewPrompt, 'Conclusion first. Two tables only for status reports.');
+  assert.equal(cfg.roles.b.reviewPrompt, undefined);
   assert.equal(cfg.roles.b.reviewMode, 'turn');
   assert.equal(cfg.roles.c.reviewMode, undefined);
   assert.equal(cfg.roles.c.reviewMinChars, undefined);
@@ -138,7 +141,8 @@ test('a role with reviewMode reviews the director reply, pushes suggestions once
       model: cheap/model
       capabilities: readability of replies
       reviewMode: agent-end
-      reviewMinChars: 20`);
+      reviewMinChars: 20
+      reviewPrompt: "Conclusion first; short paragraphs."`);
 
   // 1. Too short for reviewMinChars: no review
   await h.finishRun('short');
@@ -160,6 +164,8 @@ test('a role with reviewMode reviews the director reply, pushes suggestions once
   assert.match(send.stdin, /summarize the incident/);
   assert.match(send.stdin, /long unstructured explanation/);
   assert.match(send.stdin, /readability of replies/);
+  assert.match(send.stdin, /Review criteria:\nConclusion first; short paragraphs\./);
+  assert.match(note.message.content, /output ONLY the complete revised reply/i);
 
   // 3. The revision that answers the review note is not reviewed again
   const sendsBefore = first.filter(c => c.args[0] === 'send').length;
