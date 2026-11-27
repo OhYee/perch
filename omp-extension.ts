@@ -699,11 +699,7 @@ export default function (pi: ExtensionAPI) {
       ui.setStatus('perch', undefined);
       return;
     }
-    const parts: string[] = [];
-    if (perchModeEnabled) parts.push('perch');
-    if (running.length) parts.push(`${running.length} running`);
-    if (unhandled.length) parts.push(`${unhandled.length} done`);
-    ui.setStatus('perch', parts.join(' · '));
+    ui.setStatus('perch', `perch(${running.length} running/${unhandled.length} done)`);
   }
 
   function restorePerchModeFromBranch(ctx: ExtensionContext, config: PerchModeConfig): boolean {
@@ -1710,8 +1706,7 @@ export default function (pi: ExtensionAPI) {
             throw error;
           }
         }
-        const ui = (ctx as unknown as { ui?: { setStatus?: (k: string, v: string | undefined) => void; notify?: (m: string, l?: string) => void } }).ui;
-        ui?.setStatus?.('board', web.server.url);
+        const ui = ctx.ui;
         ui?.notify?.(`Board: ${web.server.url}`, 'info');
         const ternPane = process.env.TERN_PANE;
         if (ternPane && /^\d+$/.test(ternPane) && Number.isSafeInteger(Number(ternPane))) {
@@ -2902,7 +2897,6 @@ export default function (pi: ExtensionAPI) {
       stopIdleReaper();
       closeWeb();
       const ui = (ctx as unknown as { ui?: { setStatus?: (k: string, v: string | undefined) => void } }).ui;
-      ui?.setStatus?.('board', undefined);
       ui?.setStatus?.('perch', undefined);
     }
     await pauseAndDrain();

@@ -252,7 +252,7 @@ process.exit(0);
   assert.equal(activeTools.includes('task'), false);
   assert.equal(activeTools.includes('perch'), true);
   assert.equal(activeTools.includes('board'), true);
-  assert.equal(statuses.get('perch'), 'perch');
+  assert.equal(statuses.get('perch'), 'perch(0 running/0 done)');
 
   // 2. before_agent_start injects configured override system prompt + expanded {{roles}} + appendSystemPrompt
   const before = await handlers.get('before_agent_start')({ reason: 'prompt', prompt: 'help', systemPrompt: ['BASE'] }, ctx);
