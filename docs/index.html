@@ -1,0 +1,1964 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perch 多 Agent 编排 · 一个主控，多模型协作</title>
+<style>
+:root{
+  --bg:#fafaf8;
+  --bg-subtle:#f3f4f6;
+  --panel:#ffffff;
+  --ink:#181c22;
+  --muted:#5c6673;
+  --line:#e3e6eb;
+  --line-strong:#cfd5de;
+  --accent:#2563eb;
+  --accent-hover:#1d4ed8;
+  --accent-soft:#eff6ff;
+  --accent-border:#bfdbfe;
+  --ok:#15803d;
+  --ok-soft:#ecfdf3;
+  --ok-border:#bbf7d0;
+  --warn:#a16207;
+  --warn-soft:#fefce8;
+  --warn-border:#fde68a;
+  --bad:#b91c1c;
+  --bad-soft:#fef2f2;
+  --bad-border:#fecaca;
+  --orange:#c2410c;
+  --orange-soft:#fff7ed;
+  --orange-border:#fed7aa;
+  --purple:#6d28d9;
+  --purple-soft:#f5f3ff;
+  --purple-border:#ddd6fe;
+  --code-bg:#f4f5f7;
+  --term-bg:#11151c;
+  --term-panel:#161b24;
+  --term-line:#262e3d;
+  --term-ink:#e6edf5;
+  --term-muted:#8b97a8;
+  --shadow-sm:0 1px 2px rgba(15,23,42,.05);
+  --shadow-md:0 8px 24px -8px rgba(15,23,42,.10),0 2px 6px -2px rgba(15,23,42,.05);
+  --radius:12px;
+}
+:root[data-theme="dark"]{
+  --bg:#0d1117;
+  --bg-subtle:#131922;
+  --panel:#161b22;
+  --ink:#e6edf3;
+  --muted:#9aa5b4;
+  --line:#2b323c;
+  --line-strong:#3d4654;
+  --accent:#60a5fa;
+  --accent-hover:#93c5fd;
+  --accent-soft:#12243d;
+  --accent-border:#1e3a5f;
+  --ok:#4ade80;
+  --ok-soft:#0e2619;
+  --ok-border:#1a4731;
+  --warn:#facc15;
+  --warn-soft:#26200d;
+  --warn-border:#4a3d14;
+  --bad:#f87171;
+  --bad-soft:#2c1416;
+  --bad-border:#592226;
+  --orange:#fb923c;
+  --orange-soft:#2a190e;
+  --orange-border:#543018;
+  --purple:#c084fc;
+  --purple-soft:#211533;
+  --purple-border:#422866;
+  --code-bg:#1c222b;
+  --term-bg:#0a0d12;
+  --term-panel:#11161f;
+  --term-line:#242c39;
+  --term-ink:#e6edf5;
+  --term-muted:#8b97a8;
+  --shadow-sm:none;
+  --shadow-md:0 12px 28px -10px rgba(0,0,0,.55);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0d1117;
+    --bg-subtle:#131922;
+    --panel:#161b22;
+    --ink:#e6edf3;
+    --muted:#9aa5b4;
+    --line:#2b323c;
+    --line-strong:#3d4654;
+    --accent:#60a5fa;
+    --accent-hover:#93c5fd;
+    --accent-soft:#12243d;
+    --accent-border:#1e3a5f;
+    --ok:#4ade80;
+    --ok-soft:#0e2619;
+    --ok-border:#1a4731;
+    --warn:#facc15;
+    --warn-soft:#26200d;
+    --warn-border:#4a3d14;
+    --bad:#f87171;
+    --bad-soft:#2c1416;
+    --bad-border:#592226;
+    --orange:#fb923c;
+    --orange-soft:#2a190e;
+    --orange-border:#543018;
+    --purple:#c084fc;
+    --purple-soft:#211533;
+    --purple-border:#422866;
+    --code-bg:#1c222b;
+    --term-bg:#0a0d12;
+    --term-panel:#11161f;
+    --term-line:#242c39;
+    --term-ink:#e6edf5;
+    --term-muted:#8b97a8;
+    --shadow-sm:none;
+    --shadow-md:0 12px 28px -10px rgba(0,0,0,.55);
+  }
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--ink);
+  font:15.5px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Segoe UI",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.86em}
+code{background:var(--code-bg);padding:.12em .38em;border-radius:5px;border:1px solid var(--line)}
+pre{margin:0;overflow:auto;line-height:1.58}
+pre code{background:none;border:none;padding:0;font-size:.86em}
+
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+
+/* Sticky top nav + reading progress */
+nav.topnav{
+  position:sticky;top:0;z-index:20;
+  background:color-mix(in srgb,var(--panel) 88%,transparent);
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--line);
+}
+.progress-bar{
+  position:absolute;left:0;top:0;height:2px;width:0;
+  background:var(--accent);transition:width .08s linear;
+}
+.topnav-inner{
+  max-width:1080px;margin:0 auto;padding:10px 24px;
+  display:flex;align-items:center;justify-content:space-between;gap:16px;
+}
+.brand{
+  display:flex;align-items:center;gap:8px;font-weight:700;font-size:.96rem;
+  color:var(--ink);white-space:nowrap;text-decoration:none;
+}
+.brand:hover{text-decoration:none}
+.brand-dot{
+  width:10px;height:10px;border-radius:3px;
+  background:linear-gradient(135deg,var(--accent),var(--ok));
+  display:inline-block;
+}
+.nav-links{
+  list-style:none;margin:0;padding:0;
+  display:flex;align-items:center;gap:2px;flex-wrap:wrap;
+}
+.nav-links a{
+  font-size:.87rem;color:var(--muted);padding:5px 10px;border-radius:7px;
+  text-decoration:none;transition:background .15s,color .15s;
+}
+.nav-links a:hover{background:var(--bg-subtle);color:var(--ink);text-decoration:none}
+.nav-links a.active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.theme-btn{
+  border:1px solid var(--line);background:var(--panel);color:var(--muted);
+  border-radius:8px;padding:5px 10px;font-size:.82rem;cursor:pointer;
+  display:inline-flex;align-items:center;gap:5px;white-space:nowrap;
+  transition:border-color .15s,color .15s;
+}
+.theme-btn:hover{border-color:var(--line-strong);color:var(--ink)}
+
+/* Hero */
+header.hero{
+  padding:52px 0 44px;
+  background:
+    radial-gradient(900px 360px at 50% -80px,color-mix(in srgb,var(--accent) 10%,transparent),transparent 70%),
+    var(--panel);
+  border-bottom:1px solid var(--line);
+}
+.eyebrow{
+  display:inline-flex;align-items:center;gap:8px;
+  font-size:.82rem;font-weight:600;color:var(--accent);
+  background:var(--accent-soft);border:1px solid var(--accent-border);
+  padding:4px 12px;border-radius:999px;margin-bottom:18px;
+}
+.hero h1{
+  font-size:clamp(1.85rem,3.6vw,2.65rem);
+  line-height:1.22;letter-spacing:-.02em;margin:0 0 16px;max-width:820px;
+}
+.hero .lead{
+  font-size:1.06rem;color:var(--muted);max-width:760px;margin:0 0 24px;line-height:1.75;
+}
+.hero-actions{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:28px}
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:10px 18px;border-radius:9px;font-size:.94rem;font-weight:600;
+  text-decoration:none;cursor:pointer;border:1px solid transparent;
+  transition:transform .12s,background .15s,border-color .15s;
+}
+.btn:hover{text-decoration:none;transform:translateY(-1px)}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-ghost{background:var(--panel);color:var(--ink);border-color:var(--line-strong)}
+.btn-ghost:hover{background:var(--bg-subtle)}
+.hero-pills{
+  display:flex;flex-wrap:wrap;gap:8px 18px;font-size:.86rem;color:var(--muted);
+  margin-bottom:32px;
+}
+.hero-pills span{display:inline-flex;align-items:center;gap:6px}
+.hero-pills i{
+  width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block;
+}
+
+/* Animated 3-agent Tern workspace demo */
+.hero-install{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  background:var(--term-bg);border:1px solid var(--term-line);border-radius:10px;
+  padding:9px 10px 9px 14px;margin:-6px 0 22px;width:fit-content;max-width:100%;
+}
+.hero-install code{
+  flex:1 1 320px;background:none;border:none;padding:0;color:#e6edf5;
+  font-size:.84rem;white-space:nowrap;overflow-x:auto;
+}
+.hero-install code::before{content:"$ ";color:#4ade80}
+.hero-install .copy-btn{background:#1c2430;border-color:#334155;color:#e2e8f0}
+.hero-install .copy-btn:hover{border-color:#60a5fa;color:#93c5fd}
+
+.mockup{
+  position:relative;
+  background:var(--term-bg);
+  border:1px solid var(--term-line);
+  border-radius:14px;
+  overflow:hidden;
+  box-shadow:var(--shadow-md);
+  color:var(--term-ink);
+  font-size:13px;
+}
+.mockup-bar{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:10px 16px;background:var(--term-panel);border-bottom:1px solid var(--term-line);
+  flex-wrap:wrap;
+}
+.mockup-dots{display:flex;align-items:center;gap:6px}
+.mockup-dots span{width:10px;height:10px;border-radius:50%;display:inline-block}
+.mockup-dots span:nth-child(1){background:#ff5f56}
+.mockup-dots span:nth-child(2){background:#ffbd2e}
+.mockup-dots span:nth-child(3){background:#27c93f}
+.mockup-title{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--term-muted)}
+.mockup-badges{display:flex;gap:8px;flex-wrap:wrap}
+.mbadge{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
+  padding:2px 9px;border-radius:999px;border:1px solid var(--term-line);color:var(--term-muted);
+  transition:background .3s,color .3s,border-color .3s,transform .3s;
+}
+.mbadge.on{color:#60a5fa;border-color:#1e3a5f;background:rgba(37,99,235,.14)}
+.mbadge.ok{color:#4ade80;border-color:#1a4731;background:rgba(21,128,61,.14)}
+.mbadge.board{color:#fb923c;border-color:#543018;background:rgba(194,65,12,.14)}
+.mbadge.bump{transform:scale(1.12)}
+
+.mockup-grid{
+  display:grid;grid-template-columns:1.12fr 1fr;height:560px;
+  transition:grid-template-columns .6s cubic-bezier(.4,0,.2,1);
+}
+.mockup-grid[data-workers="0"]{grid-template-columns:1fr 0fr}
+.win-stack{
+  display:grid;grid-template-rows:1fr 1fr;min-width:0;min-height:0;overflow:hidden;
+  transition:grid-template-rows .6s cubic-bezier(.4,0,.2,1);
+}
+.mockup-grid[data-workers="1"] .win-stack{grid-template-rows:1fr 0fr}
+.mockup-grid[data-workers="0"] .win-director{border-right-color:transparent}
+.mockup-grid:not([data-workers="2"]) .win-stack .agent-win:first-child{border-bottom-color:transparent}
+.agent-win.is-off{opacity:0;visibility:hidden}
+.win-stack .agent-win{transition:opacity .45s ease .25s,box-shadow .35s}
+.agent-win{
+  display:flex;flex-direction:column;min-width:0;min-height:0;
+  background:var(--term-bg);position:relative;
+  transition:box-shadow .35s;
+}
+.win-director{border-right:1px solid var(--term-line)}
+.win-stack .agent-win:first-child{border-bottom:1px solid var(--term-line)}
+.agent-win.pulse{box-shadow:inset 0 0 0 2px rgba(96,165,250,.55)}
+.agent-win.pulse-amber{box-shadow:inset 0 0 0 2px rgba(251,191,36,.55)}
+.win-hd{
+  display:flex;align-items:center;gap:10px;padding:9px 14px;
+  background:var(--term-panel);border-bottom:1px solid var(--term-line);
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:var(--term-muted);
+}
+.win-logo{
+  font-weight:700;font-size:11px;padding:2px 7px;border-radius:5px;letter-spacing:.02em;
+  color:#0b0f14;
+}
+.win-logo.omp{background:#93c5fd}
+.win-logo.agy{background:linear-gradient(90deg,#f87171,#fbbf24,#4ade80,#60a5fa)}
+.win-name{color:var(--term-ink);font-weight:600}
+.win-meta{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wstate{display:inline-flex;align-items:center;gap:5px;font-size:11px;white-space:nowrap}
+.wstate::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.wstate.idle{color:#64748b}
+.wstate.run{color:#4ade80}
+.wstate.run::before{animation:blink 1s infinite}
+.wstate.wait{color:#60a5fa}
+.wstate.done{color:#93c5fd}
+@keyframes blink{50%{opacity:.25}}
+.win-body{
+  flex:1;min-height:0;overflow:hidden;padding:12px 14px;
+  display:flex;flex-direction:column;gap:8px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.8px;line-height:1.55;
+}
+.win-body>*{animation:lineIn .35s ease-out}
+.win-body [hidden]{display:none!important}
+@keyframes lineIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.ln-user{
+  background:rgba(96,165,250,.12);border-left:3px solid #60a5fa;
+  padding:7px 10px;border-radius:0 6px 6px 0;color:#dbeafe;
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;font-size:12.5px;
+}
+.ln-prompt{
+  background:rgba(148,163,184,.10);border:1px solid var(--term-line);
+  padding:7px 10px;border-radius:6px;color:#cbd5e1;
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;font-size:12px;
+}
+.ln-prompt b{color:#e2e8f0}
+.ln-text{color:#cbd5e1;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;font-size:12.5px}
+.ln-tool{color:#93c5fd}
+.ln-tool::before{content:"⏺ ";color:#60a5fa}
+.ln-cmd{color:#e2e8f0}
+.ln-cmd::before{content:"$ ";color:#4ade80}
+.ln-out{color:#94a3b8;padding-left:14px}
+.ln-ok{color:#4ade80}
+.ln-board{color:#fb923c}
+.ln-board::before{content:"↳ ";color:#fb923c}
+.ln-find{color:#fca5a5}
+.ln-find.p2{color:#fde68a}
+.ln-muted{color:#64748b}
+.ln-async{
+  align-self:flex-start;color:#fbbf24;background:rgba(251,191,36,.10);
+  border:1px solid rgba(251,191,36,.3);padding:4px 8px;border-radius:6px;
+}
+.ln-table{width:100%;border-collapse:collapse;font-size:11.5px}
+.ln-table th,.ln-table td{padding:4px 7px;border-bottom:1px solid var(--term-line);text-align:left}
+.ln-table th{color:var(--term-muted);font-weight:600;background:rgba(255,255,255,.04)}
+.ln-table tr:last-child td{border-bottom:none}
+.win-input{
+  margin:0 12px 8px;padding:8px 10px;border:1px solid var(--term-line);border-radius:8px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#e2e8f0;
+  display:flex;gap:6px;align-items:center;min-height:34px;
+}
+.win-input .caret{color:#60a5fa}
+.win-input .ph{color:#475569}
+.win-input .cursor{display:inline-block;width:7px;height:14px;background:#93c5fd;animation:blink 1s steps(1) infinite;vertical-align:middle}
+.win-status{
+  padding:0 14px 9px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:10.5px;color:#475569;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.flow-layer{position:absolute;inset:0;pointer-events:none;z-index:3}
+.packet{
+  position:absolute;left:0;top:0;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;font-weight:600;
+  padding:3px 9px;border-radius:999px;white-space:nowrap;
+  color:#0b0f14;background:#93c5fd;box-shadow:0 0 0 4px rgba(96,165,250,.18),0 0 18px rgba(96,165,250,.55);
+}
+.packet.amber{background:#fcd34d;box-shadow:0 0 0 4px rgba(251,191,36,.18),0 0 18px rgba(251,191,36,.55)}
+.packet.orange{background:#fdba74;box-shadow:0 0 0 4px rgba(251,146,60,.18),0 0 18px rgba(251,146,60,.55)}
+.demo-caption{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:10px 16px;background:var(--term-panel);border-top:1px solid var(--term-line);
+  font-size:12.5px;color:#cbd5e1;
+}
+.demo-phases{display:flex;gap:6px;flex-wrap:wrap;flex:1}
+.demo-phase{
+  padding:3px 10px;border-radius:999px;border:1px solid var(--term-line);color:#64748b;
+  font-size:11.5px;transition:all .3s;white-space:nowrap;
+}
+.demo-phase.active{color:#0b0f14;background:#93c5fd;border-color:#93c5fd;font-weight:600}
+.demo-phase.past{color:#93c5fd;border-color:#1e3a5f}
+.demo-replay{
+  border:1px solid #334155;background:#1c2430;color:#e2e8f0;border-radius:7px;
+  padding:4px 11px;font-size:12px;cursor:pointer;
+}
+.demo-replay:hover{border-color:#60a5fa;color:#93c5fd}
+
+/* Sections */
+section{padding:52px 0 12px;scroll-margin-top:64px}
+.sec-hd{margin-bottom:22px}
+.sec-kicker{
+  font-size:.78rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--accent);margin-bottom:6px;display:block;
+}
+h2{font-size:1.55rem;line-height:1.3;margin:0 0 10px;letter-spacing:-.015em}
+h3{font-size:1.1rem;margin:24px 0 10px;line-height:1.4}
+.sec-desc{color:var(--muted);max-width:780px;margin:0;font-size:.98rem}
+
+/* Cards & Grids */
+.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(235px,1fr));margin:18px 0}
+.grid-2{display:grid;gap:18px;grid-template-columns:repeat(2,minmax(0,1fr));margin:18px 0}
+.card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:18px 20px;box-shadow:var(--shadow-sm);
+}
+.card h3{margin:0 0 10px;font-size:1.05rem;display:flex;align-items:center;gap:9px}
+.card p{margin:0;color:var(--muted);font-size:.93rem}
+.card-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.card-list li{position:relative;padding-left:14px;color:var(--muted);font-size:.93rem;line-height:1.65}
+.card-list li::before{content:"";position:absolute;left:0;top:.62em;width:5px;height:5px;border-radius:50%;background:var(--accent);opacity:.65}
+.card-list strong{color:var(--ink);font-weight:600}
+.icon-badge{
+  width:28px;height:28px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;
+  font-size:.88rem;font-weight:700;background:var(--accent-soft);color:var(--accent);flex-shrink:0;
+}
+
+/* Callouts */
+.callout{
+  border-left:4px solid var(--accent);background:var(--accent-soft);
+  border-top:1px solid var(--accent-border);border-right:1px solid var(--accent-border);border-bottom:1px solid var(--accent-border);
+  padding:13px 16px;border-radius:0 10px 10px 0;margin:18px 0;font-size:.93rem;
+}
+.callout.warn{border-left-color:var(--warn);background:var(--warn-soft);border-color:var(--warn-border);border-left-width:4px}
+.callout.bad{border-left-color:var(--bad);background:var(--bad-soft);border-color:var(--bad-border);border-left-width:4px}
+.callout p{margin:0}
+
+/* Tags */
+.tag{
+  display:inline-flex;align-items:center;font-size:.76rem;font-weight:600;
+  padding:2px 9px;border-radius:999px;border:1px solid var(--line);white-space:nowrap;
+}
+.tag.ro{background:var(--ok-soft);border-color:var(--ok-border);color:var(--ok)}
+.tag.rw{background:var(--orange-soft);border-color:var(--orange-border);color:var(--orange)}
+.tag.auto{background:var(--purple-soft);border-color:var(--purple-border);color:var(--purple)}
+.tag.tier{background:var(--bg-subtle);border-color:var(--line);color:var(--muted);font-weight:500}
+
+/* Figures / SVG */
+figure{margin:20px 0}
+.svg-scroll{
+  overflow-x:auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius);padding:10px;box-shadow:var(--shadow-sm);
+}
+figure svg{width:100%;min-width:760px;height:auto;display:block}
+.scroll-hint{
+  display:none;font-size:.8rem;color:var(--muted);text-align:center;margin-top:6px;
+}
+figcaption{font-size:.87rem;color:var(--muted);margin-top:8px}
+
+/* SVG theme */
+svg text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;fill:var(--ink);font-size:13px}
+svg .t-sm{font-size:12px;fill:var(--muted)}
+svg .t-b{font-weight:600;font-size:14px}
+svg .halo{stroke:var(--panel);stroke-width:5px;paint-order:stroke}
+svg .box{fill:var(--panel);stroke:var(--line-strong);stroke-width:1.5}
+svg .b-main{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}
+svg .b-perch{fill:var(--bg-subtle);stroke:var(--line-strong);stroke-width:1.5}
+svg .b-worker{fill:var(--ok-soft);stroke:var(--ok);stroke-width:1.5}
+svg .b-board{fill:var(--orange-soft);stroke:var(--orange);stroke-width:1.5}
+svg .b-user{fill:var(--panel);stroke:var(--ink);stroke-width:1.5}
+svg .ln{stroke:var(--ink);stroke-width:1.6;fill:none}
+svg .ln-d{stroke:var(--orange);stroke-width:1.6;fill:none;stroke-dasharray:6 4}
+svg .life{stroke:var(--line-strong);stroke-width:1.2;stroke-dasharray:4 4}
+svg .lane{fill:var(--bg-subtle);stroke:var(--line-strong)}
+svg marker path{fill:var(--ink)}
+svg marker.m-d path{fill:var(--orange)}
+
+/* Tables */
+.tablewrap{
+  overflow-x:auto;margin:16px 0;border:1px solid var(--line);
+  border-radius:var(--radius);background:var(--panel);box-shadow:var(--shadow-sm);
+}
+.tablewrap table{border-collapse:collapse;width:100%;min-width:600px;font-size:.92rem}
+.tablewrap th,.tablewrap td{padding:11px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.tablewrap th{background:var(--bg-subtle);font-weight:600;white-space:nowrap;font-size:.86rem;color:var(--muted)}
+.tablewrap tr:last-child td{border-bottom:none}
+
+/* Numbered rules grid */
+.rules-grid{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(0,1fr));margin:18px 0}
+.rule-item{
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:14px 16px;display:flex;gap:12px;align-items:flex-start;
+}
+.rule-num{
+  width:24px;height:24px;border-radius:999px;background:var(--accent-soft);color:var(--accent);
+  font-weight:700;font-size:.82rem;display:inline-flex;align-items:center;justify-content:center;
+  flex-shrink:0;margin-top:2px;
+}
+.rule-item strong{display:block;margin-bottom:3px;font-size:.95rem}
+.rule-item p{margin:0;color:var(--muted);font-size:.89rem}
+
+/* Filter pills & Role cards */
+.filter-bar{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 14px}
+.pill-btn{
+  border:1px solid var(--line);background:var(--panel);color:var(--muted);
+  padding:6px 13px;border-radius:999px;font-size:.85rem;font-weight:500;cursor:pointer;
+  transition:all .15s;
+}
+.pill-btn:hover{border-color:var(--line-strong);color:var(--ink)}
+.pill-btn.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.role-grid{display:grid;gap:14px;grid-template-columns:repeat(2,minmax(0,1fr))}
+.role-card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:15px 17px;box-shadow:var(--shadow-sm);display:flex;flex-direction:column;gap:8px;
+}
+.role-card[hidden]{display:none}
+.role-top{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.role-names{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.role-card p{margin:0;color:var(--muted);font-size:.91rem}
+.role-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:auto;padding-top:6px;border-top:1px dashed var(--line);font-size:.82rem;color:var(--muted)}
+
+/* Interactive SOP Explorer */
+.sop-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin:18px 0 14px}
+.sop-tabs{display:flex;flex-wrap:wrap;gap:8px}
+.sop-list{display:grid;gap:14px}
+.sop-panel{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:20px 22px;box-shadow:var(--shadow-sm);
+}
+.sop-panel[hidden]{display:none}
+.sop-panel-hd{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.sop-panel-hd h3{margin:0;font-size:1.12rem}
+.sop-roles{display:flex;flex-wrap:wrap;gap:6px}
+.sop-body{display:grid;gap:14px;grid-template-columns:1.35fr 1fr}
+.sop-col h4{margin:0 0 6px;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.sop-col p{margin:0;font-size:.94rem}
+.sop-guard{
+  background:var(--bg-subtle);border:1px solid var(--line);border-radius:9px;
+  padding:12px 14px;font-size:.9rem;color:var(--ink);
+}
+
+/* Evidence / Case Cards */
+.case-card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:20px 22px;box-shadow:var(--shadow-sm);display:flex;flex-direction:column;gap:14px;
+}
+.case-hd{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.case-hd h3{margin:0;font-size:1.08rem}
+.kpi-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.kpi{background:var(--bg-subtle);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+.kpi b{display:block;font-size:1.35rem;line-height:1.2;color:var(--ink)}
+.kpi span{font-size:.8rem;color:var(--muted)}
+.case-card p{margin:0;color:var(--muted);font-size:.92rem}
+
+/* Code blocks with header & copy button */
+.code-block{
+  margin:14px 0 18px;border:1px solid var(--line);border-radius:10px;
+  overflow:hidden;background:var(--code-bg);
+}
+.code-hd{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:7px 12px;background:var(--bg-subtle);border-bottom:1px solid var(--line);
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--muted);
+}
+.copy-btn{
+  border:1px solid var(--line-strong);background:var(--panel);color:var(--ink);
+  border-radius:6px;padding:3px 10px;font-size:.78rem;cursor:pointer;
+  transition:background .15s,border-color .15s,color .15s;
+}
+.copy-btn:hover{border-color:var(--accent);color:var(--accent)}
+.copy-btn.copied{background:var(--ok-soft);border-color:var(--ok-border);color:var(--ok)}
+.code-block pre{padding:14px 16px}
+
+/* Onboarding Tier Switcher */
+.tier-cards{display:grid;gap:12px;grid-template-columns:repeat(3,minmax(0,1fr));margin:16px 0}
+.tier-card{
+  text-align:left;cursor:pointer;background:var(--panel);
+  border:1.5px solid var(--line);border-radius:var(--radius);
+  padding:15px 16px;transition:border-color .15s,background .15s,box-shadow .15s;
+  color:var(--ink);font:inherit;
+}
+.tier-card:hover{border-color:var(--line-strong)}
+.tier-card.active{
+  border-color:var(--accent);background:var(--accent-soft);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 14%,transparent);
+}
+.tier-card strong{display:block;font-size:.98rem;margin-bottom:4px}
+.tier-card span{display:block;font-size:.85rem;color:var(--muted);line-height:1.5}
+.tier-panel[hidden]{display:none}
+
+/* Step list */
+.step-block{
+  border-left:2px solid var(--line);padding-left:20px;margin:24px 0;position:relative;
+}
+.step-block::before{
+  content:attr(data-step);
+  position:absolute;left:-13px;top:0;width:24px;height:24px;border-radius:50%;
+  background:var(--accent);color:#fff;font-size:.8rem;font-weight:700;
+  display:flex;align-items:center;justify-content:center;
+}
+.step-block h3{margin:0 0 8px}
+.step-block>p{margin:0 0 10px;color:var(--muted);font-size:.94rem}
+
+details{
+  margin:14px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel);
+}
+details>summary{
+  cursor:pointer;padding:11px 15px;font-weight:600;font-size:.93rem;
+}
+details>div{padding:0 15px 14px;color:var(--muted);font-size:.91rem}
+details>div p{margin:6px 0}
+
+/* Limits list */
+.limits-grid{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(0,1fr));margin:16px 0}
+.limit-item{
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:14px 16px;font-size:.91rem;color:var(--muted);
+}
+.limit-item strong{display:block;color:var(--ink);margin-bottom:4px;font-size:.94rem}
+
+footer{
+  margin-top:40px;padding:28px 0 56px;border-top:1px solid var(--line);
+  color:var(--muted);font-size:.87rem;
+}
+.footer-inner{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+
+@media (max-width:860px){
+  .mockup-grid,.grid-2,.rules-grid,.role-grid,.sop-body,.tier-cards,.limits-grid{grid-template-columns:1fr}
+  .mockup-grid,.mockup-grid[data-workers]{grid-template-columns:1fr;height:auto}
+  .mockup-grid[data-workers="0"] .win-stack{display:none}
+  .mockup-grid[data-workers="1"] #winNeon{display:none}
+  .win-director{height:400px;border-right:none;border-bottom:1px solid var(--term-line)}
+  .win-stack .agent-win{height:300px}
+  .scroll-hint{display:block}
+}
+@media (max-width:640px){
+  .wrap,.topnav-inner{padding-left:16px;padding-right:16px}
+  .nav-links{display:none}
+  header.hero{padding:36px 0 32px}
+  section{padding:38px 0 8px}
+}
+@media print{
+  nav.topnav,.hero-actions,.filter-bar,.sop-bar,.copy-btn,.tier-cards{display:none!important}
+  .role-card[hidden],.sop-panel[hidden],.tier-panel[hidden]{display:block!important}
+  details:not([open])>div{display:block}
+  body{background:#fff;color:#111}
+  .card,.tablewrap,.svg-scroll,.case-card,.sop-panel{box-shadow:none}
+  figure,.case-card,.role-card{page-break-inside:avoid}
+}
+</style>
+</head>
+<body>
+<nav class="topnav" aria-label="页面导航">
+  <div class="progress-bar" id="progressBar" aria-hidden="true"></div>
+  <div class="topnav-inner">
+    <a class="brand" href="#"><span class="brand-dot"></span>Perch Workflow</a>
+    <ul class="nav-links" id="navLinks">
+      <li><a href="#overview">为什么</a></li>
+      <li><a href="#architecture">架构</a></li>
+      <li><a href="#flow">一轮任务</a></li>
+      <li><a href="#roles">角色</a></li>
+      <li><a href="#sop">七套流程</a></li>
+      <li><a href="#mechanisms">机制</a></li>
+      <li><a href="#evidence">真实案例</a></li>
+      <li><a href="#adopt">快速上手</a></li>
+      <li><a href="#limits">边界</a></li>
+    </ul>
+    <button type="button" class="theme-btn" id="themeToggle" aria-label="切换浅色或深色主题">☾ 主题</button>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">OhYee/perch · 多 Agent 编排工作流</div>
+    <h1>一个主控只管调度，多个独立模型并行干活</h1>
+    <p class="lead">把「拆任务、派发、核验、汇报」和「读代码、写代码、跑测试、做评审」拆开：主控保持干净上下文，每个 worker 是独立可见的终端会话，完成后异步回推，看板记录每一项任务与决策。</p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="#adopt">10 分钟上手 →</a>
+      <a class="btn btn-ghost" href="#flow">看一轮任务怎么跑</a>
+      <a class="btn btn-ghost" href="https://github.com/OhYee/perch" target="_blank" rel="noopener">GitHub 仓库</a>
+    </div>
+    <div class="hero-pills">
+      <span><i></i>兼容 omp · agy · codex · claude</span>
+      <span><i></i>可见终端窗格，随时人工接管</span>
+      <span><i></i>按短名续接，关闭后仍可自动恢复</span>
+      <span><i></i>无需常驻守护进程</span>
+    </div>
+
+    <div class="hero-install">
+      <code id="heroInstallCmd">curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta</code>
+      <button type="button" class="copy-btn" data-copy-target="heroInstallCmd">复制安装命令</button>
+    </div>
+
+    <!-- Animated preview: one director + two worker agents in a Tern workspace. Without JS it shows the final state. -->
+    <div class="mockup" id="demo" role="img" aria-label="Perch 运行示意动画：左侧主控 omp 会话接收需求并派发，右侧上下堆叠 omp 与 agy 两个独立 worker 会话执行审查、写看板并异步回推结果，主控最后汇总">
+      <div class="mockup-bar">
+        <div class="mockup-dots"><span></span><span></span><span></span></div>
+        <div class="mockup-title">tern · ~/workspace/project</div>
+        <div class="mockup-badges">
+          <span class="mbadge on">/perch on</span>
+          <span class="mbadge ok" id="demoWorkers">2 workers</span>
+          <span class="mbadge board" id="demoBoard">/board · 2 updates</span>
+        </div>
+      </div>
+      <div class="mockup-grid" id="demoGrid" data-workers="2">
+        <div class="agent-win win-director" id="winDirector">
+          <div class="win-hd"><span class="win-logo omp">omp</span><span class="win-name">主控</span><span class="win-meta">/perch 模式 · gpt-6.2-sol</span><span class="wstate wait" data-state>等您拍板</span></div>
+          <div class="win-body">
+            <div class="ln-user" data-at="2">审查当前分支相对主干的改动，高风险点请两个模型分别看</div>
+            <div class="ln-text" data-at="3">我把审查拆成两路并行盲审：正确性与并发交给 rev-sol，结构与契约交给 rev-neon。</div>
+            <div class="ln-tool" data-at="4">perch start role=review-sol name=rev-sol</div>
+            <div class="ln-tool" data-at="5">perch start role=review-neon name=rev-neon</div>
+            <div class="ln-muted" data-at="6">✓ 已派发 2 个 worker，本轮结束，等待异步回推…</div>
+            <div class="ln-async" data-at="14">⚡ [Perch async update] rev-neon · done · 2 条发现</div>
+            <div class="ln-async" data-at="17">⚡ [Perch async update] rev-sol · done · 1 条 P1</div>
+            <div data-at="18">
+              <table class="ln-table">
+                <thead><tr><th>正在做的任务</th><th>结论</th></tr></thead>
+                <tbody>
+                  <tr><td>rev-sol · 正确性</td><td>P1 锁释放竞态</td></tr>
+                  <tr><td>rev-neon · 结构</td><td>P2 ×2 超时/错误码</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="ln-text" data-at="19">决策：P1 交回原开发 worker 修复，P2 合并后跟进。需要您确认是否开始修复？</div>
+          </div>
+          <div class="win-input"><span class="caret">›</span><span id="dirInput"><span class="ph">输入需求…</span></span></div>
+          <div class="win-status">tools: perch · board · read · ask │ ctx 9%</div>
+        </div>
+        <div class="win-stack">
+          <div class="agent-win" id="winSol">
+            <div class="win-hd"><span class="win-logo omp">omp</span><span class="win-name">rev-sol</span><span class="win-meta">review-sol · 独立会话</span><span class="wstate done" data-state>done · 可 send 追问</span></div>
+            <div class="win-body">
+              <div class="ln-prompt" data-at="7"><b>[Worker]</b> 审查 main...HEAD，关注正确性、并发与锁生命周期，输出 文件:行号 + P0/P1/P2</div>
+              <div class="ln-cmd" data-at="8">git diff main...HEAD --stat</div>
+              <div class="ln-out" data-at="9">12 files changed, 348 insertions(+), 97 deletions(-)</div>
+              <div class="ln-tool" data-at="10">read src/session/lock.ts</div>
+              <div class="ln-board" data-at="12">perch board progress "确认 1 处竞态边界"</div>
+              <div class="ln-cmd" data-at="14">npm test -- session</div>
+              <div class="ln-out" data-at="15">✓ 38 passed · 复现脚本命中竞态 1/20</div>
+              <div class="ln-find" data-at="16">P1 · session/lock.ts:88 释放前未校验持有者</div>
+              <div class="ln-ok" data-at="16">✓ 摘要已回推主控</div>
+            </div>
+            <div class="win-input"><span class="caret">›</span><span class="ph">等待主控指令…</span></div>
+          </div>
+          <div class="agent-win" id="winNeon">
+            <div class="win-hd"><span class="win-logo agy">agy</span><span class="win-name">rev-neon</span><span class="win-meta">review-neon · Gemini · 独立会话</span><span class="wstate done" data-state>done · 可 send 追问</span></div>
+            <div class="win-body">
+              <div class="ln-prompt" data-at="7"><b>[Worker]</b> 审查 main...HEAD，关注结构、接口契约与边界条件，输出 文件:行号 + P0/P1/P2</div>
+              <div class="ln-tool" data-at="9">Explored 6 files (api/, auth/)</div>
+              <div class="ln-cmd" data-at="10">npm test -- auth</div>
+              <div class="ln-out" data-at="11">✓ 42 passed</div>
+              <div class="ln-board" data-at="11">perch board progress "接口契约核对完成"</div>
+              <div class="ln-find p2" data-at="13">P2 · auth/session.ts:142 缺少超时兜底</div>
+              <div class="ln-find p2" data-at="13">P2 · api/handler.ts:88 错误码未映射</div>
+              <div class="ln-ok" data-at="13">✓ 摘要已回推主控</div>
+            </div>
+            <div class="win-input"><span class="caret">›</span><span class="ph">等待主控指令…</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="flow-layer" id="demoFlow" aria-hidden="true"></div>
+      <div class="demo-caption">
+        <div class="demo-phases" id="demoPhases">
+          <span class="demo-phase past">① 提需求</span>
+          <span class="demo-phase past">② 拆分派发</span>
+          <span class="demo-phase past">③ 独立执行 · 写看板</span>
+          <span class="demo-phase past">④ 异步回推</span>
+          <span class="demo-phase active">⑤ 汇总 · 等您拍板</span>
+        </div>
+        <button type="button" class="demo-replay" id="demoReplay">↻ 重播</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+<section id="overview">
+<div class="wrap">
+  <div class="sec-hd">
+    <span class="sec-kicker">01 · Why Perch</span>
+    <h2>为什么需要把「调度」和「干活」拆开</h2>
+    <p class="sec-desc">把调研、开发、自测、评审全塞进同一个对话里，上下文会迅速膨胀，模型也很难跳出自己的思路审出盲区。Perch 用四个简单约束解决这件事：</p>
+  </div>
+  <div class="grid-2">
+    <div class="card">
+      <h3><span class="icon-badge">1</span>主控只调度</h3>
+      <ul class="card-list">
+        <li><strong>工具收窄：</strong>仅保留 <code>perch</code>、<code>board</code>、<code>read</code>、<code>ask</code>，不提供编辑与 shell 能力。</li>
+        <li><strong>强制下发：</strong>从工具层避免主 agent 自己上手干活，查代码、改文件、跑测试必须派给 worker。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3><span class="icon-badge">2</span>worker 是独立可见会话</h3>
+      <ul class="card-list">
+        <li><strong>原生完整能力：</strong>每个 worker 都是真正的官方 agent 会话（omp / agy / codex / claude），能力不打折，同时避免接口滥用与封号风险。</li>
+        <li><strong>窗格随时接管：</strong>每个 worker 占右侧独立窗格，执行过程实时可见，必要时可直接切过去接管。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3><span class="icon-badge">3</span>异步回推，按短名复用</h3>
+      <ul class="card-list">
+        <li><strong>派发即返回：</strong>主控派发完立刻结束本轮、不空转等待，worker 完成后自动异步回推。</li>
+        <li><strong>短名续接与恢复：</strong>后续追问用 <code>send</code> 加短名复用原 worker，已关闭的会话也会自动恢复。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3><span class="icon-badge">4</span>独立评审 + 看板留痕</h3>
+      <ul class="card-list">
+        <li><strong>评审独立：</strong>必须新开干净会话审查，执行者不能自审，避免同一上下文盲区。</li>
+        <li><strong>人能跟得上 AI：</strong>长任务、多 agent 并行时容易遗漏，通过 <code>/board</code> 看板沉淀任务、决策与进度，随时审查每一步。</li>
+      </ul>
+    </div>
+  </div>
+</div>
+</section>
+
+<section id="architecture">
+<div class="wrap">
+  <div class="sec-hd">
+    <span class="sec-kicker">02 · Architecture</span>
+    <h2>整体架构</h2>
+    <p class="sec-desc">主控通过 OMP 扩展调用 <code>perch</code> CLI 管理不同 provider 的 worker；看板挂在主控会话下，主控读写全部内容，worker 通过本机私有 socket 读写自己被指派的工作项。</p>
+  </div>
+  <figure>
+    <div class="svg-scroll">
+      <svg viewBox="0 0 980 480" role="img" aria-labelledby="fig1t fig1d">
+        <title id="fig1t">Perch 架构图</title>
+        <desc id="fig1d">用户与主控交互，主控经 Perch 扩展和 CLI 启动 omp、agy、codex 或 claude 的 worker 窗格；看板由主控读写，worker 通过 perch board 命令读写自己的工作项。</desc>
+        <defs>
+          <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker>
+          <marker id="a2" class="m-d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker>
+        </defs>
+        <rect class="b-user" x="20" y="150" width="110" height="70" rx="10"/>
+        <text class="t-b" x="75" y="182" text-anchor="middle">您</text>
+        <text class="t-sm" x="75" y="202" text-anchor="middle">提需求 · 拍板</text>
+
+        <rect class="b-main" x="190" y="110" width="240" height="150" rx="12"/>
+        <text class="t-b" x="310" y="140" text-anchor="middle">主控 omp（/perch 模式）</text>
+        <text class="t-sm" x="310" y="164" text-anchor="middle">工具：perch · board · read · ask</text>
+        <text class="t-sm" x="310" y="184" text-anchor="middle">只拆分、派发、核验、汇报</text>
+        <text class="t-sm" x="310" y="204" text-anchor="middle">每轮注入 Perch 工作区视图</text>
+        <text class="t-sm" x="310" y="224" text-anchor="middle">汇报固定含「任务表 + 决策表」</text>
+
+        <rect class="b-perch" x="480" y="30" width="170" height="320" rx="12"/>
+        <text class="t-b" x="565" y="62" text-anchor="middle">Perch 扩展 + CLI</text>
+        <text class="t-sm" x="565" y="90" text-anchor="middle">start · send · wait</text>
+        <text class="t-sm" x="565" y="110" text-anchor="middle">history · resume · close</text>
+        <text class="t-sm" x="565" y="140" text-anchor="middle">角色 → 模型 / 窗格</text>
+        <text class="t-sm" x="565" y="160" text-anchor="middle">按短名续接 · 自动恢复</text>
+        <text class="t-sm" x="565" y="190" text-anchor="middle">完成后异步回推</text>
+        <text class="t-sm" x="565" y="210" text-anchor="middle">[Perch async update]</text>
+        <text class="t-sm" x="565" y="240" text-anchor="middle">闲置窗格自动回收</text>
+        <text class="t-sm" x="565" y="270" text-anchor="middle">自动评审 reviewMode</text>
+
+        <rect class="b-worker" x="710" y="40" width="250" height="90" rx="10"/>
+        <text class="t-b" x="835" y="72" text-anchor="middle">worker · omp</text>
+        <text class="t-sm" x="835" y="94" text-anchor="middle">独立会话 + 可见窗格</text>
+        <text class="t-sm" x="835" y="112" text-anchor="middle">例：开发、只读查证</text>
+        <rect class="b-worker" x="710" y="160" width="250" height="90" rx="10"/>
+        <text class="t-b" x="835" y="192" text-anchor="middle">worker · agy</text>
+        <text class="t-sm" x="835" y="214" text-anchor="middle">独立会话 + 可见窗格</text>
+        <text class="t-sm" x="835" y="232" text-anchor="middle">例：长上下文排查、方案、评审</text>
+        <rect class="b-worker" x="710" y="280" width="250" height="70" rx="10"/>
+        <text class="t-b" x="835" y="310" text-anchor="middle">worker · codex / claude</text>
+        <text class="t-sm" x="835" y="332" text-anchor="middle">同一套命令管理</text>
+
+        <rect class="b-board" x="330" y="395" width="330" height="70" rx="10"/>
+        <text class="t-b" x="495" y="424" text-anchor="middle">会话看板 board</text>
+        <text class="t-sm" x="495" y="444" text-anchor="middle">工作项 · 验收标准 · 决策 · 回执（/board 网页可看）</text>
+
+        <path class="ln" d="M130 185 H190" marker-end="url(#a1)"/>
+        <path class="ln" d="M430 185 H480" marker-start="url(#a1)" marker-end="url(#a1)"/>
+        <path class="ln" d="M650 85 H710" marker-end="url(#a1)"/>
+        <path class="ln" d="M650 205 H710" marker-end="url(#a1)"/>
+        <path class="ln" d="M650 315 H710" marker-end="url(#a1)"/>
+        <path class="ln" d="M380 260 V395" marker-end="url(#a1)"/>
+        <text class="t-sm halo" x="368" y="330" text-anchor="end">board 工具：读写全部</text>
+        <text class="t-sm" x="368" y="330" text-anchor="end">board 工具：读写全部</text>
+        <path class="ln-d" d="M835 350 V430 H660" marker-end="url(#a2)"/>
+        <text class="t-sm halo" x="672" y="418">perch board：只限自己的工作项（本机私有 socket）</text>
+        <text class="t-sm" x="672" y="418">perch board：只限自己的工作项（本机私有 socket）</text>
+      </svg>
+    </div>
+    <div class="scroll-hint">← 左右滑动查看完整架构图 →</div>
+    <figcaption>图 1　实线是调度与异步回推，虚线是 worker 写入自己工作项的通道。</figcaption>
+  </figure>
+
+  <div class="tablewrap"><table>
+    <thead><tr><th>组件</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>perch</code> CLI</td><td>发现本机会话，执行启动、发送、读历史、等待、恢复、关闭；统一适配 omp、agy、codex、claude，不需要常驻后台服务。</td></tr>
+      <tr><td>OMP 扩展</td><td>提供 <code>/perch</code> 模式、<code>perch</code> 与 <code>board</code> 工具、角色解析、异步回推、工作区视图和闲置回收。</td></tr>
+      <tr><td>会话看板</td><td>每个主控会话独立 SQLite 看板并附本地网页（<code>/board</code>）；记录工作项、验收标准、决策和回执。</td></tr>
+      <tr><td>终端窗格</td><td>每个 worker 占一个右侧堆叠窗格（依赖 Tern）；没有窗格环境时可设 <code>native: false</code> 走后台会话。</td></tr>
+    </tbody>
+  </table></div>
+</div>
+</section>
+
+<section id="flow">
+<div class="wrap">
+  <div class="sec-hd">
+    <span class="sec-kicker">03 · Lifecycle</span>
+    <h2>一轮任务怎么跑</h2>
+    <p class="sec-desc">以「审查当前分支」为例：您只需提一句需求，主控负责拆分、并行派发、交叉核验与汇报，只在需要拍板时找您。</p>
+  </div>
+  <figure>
+    <div class="svg-scroll">
+      <svg viewBox="0 0 980 560" role="img" aria-labelledby="fig2t fig2d">
+        <title id="fig2t">一轮任务的时序图</title>
+        <desc id="fig2d">用户提需求后，主控建看板项并并行派发两个 worker；worker 写进展并异步回推；主控核验、追问、汇报；用户确认后主控关闭窗格。</desc>
+        <defs>
+          <marker id="s1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker>
+          <marker id="s2" class="m-d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker>
+        </defs>
+        <rect class="lane" x="40" y="8" width="140" height="40" rx="8"/><text class="t-b" x="110" y="33" text-anchor="middle">您</text>
+        <rect class="lane" x="250" y="8" width="160" height="40" rx="8"/><text class="t-b" x="330" y="33" text-anchor="middle">主控</text>
+        <rect class="lane" x="540" y="8" width="160" height="40" rx="8"/><text class="t-b" x="620" y="33" text-anchor="middle">worker（多个）</text>
+        <rect class="lane" x="790" y="8" width="140" height="40" rx="8"/><text class="t-b" x="860" y="33" text-anchor="middle">看板</text>
+        <path class="life" d="M110 48 V545"/><path class="life" d="M330 48 V545"/><path class="life" d="M620 48 V545"/><path class="life" d="M860 48 V545"/>
+
+        <path class="ln" d="M110 90 H330" marker-end="url(#s1)"/>
+        <text class="t-sm halo" x="220" y="82" text-anchor="middle">1 提需求：review 当前分支</text><text class="t-sm" x="220" y="82" text-anchor="middle">1 提需求：review 当前分支</text>
+
+        <path class="ln" d="M330 135 H860" marker-end="url(#s1)"/>
+        <text class="t-sm halo" x="595" y="127" text-anchor="middle">2 建工作项与验收标准（正式任务才建）</text><text class="t-sm" x="595" y="127" text-anchor="middle">2 建工作项与验收标准（正式任务才建）</text>
+
+        <path class="ln" d="M330 180 H620" marker-end="url(#s1)"/>
+        <text class="t-sm halo" x="475" y="172" text-anchor="middle">3 start：两个模型族并行，各自独立会话</text><text class="t-sm" x="475" y="172" text-anchor="middle">3 start：两个模型族并行，各自独立会话</text>
+
+        <path class="ln-d" d="M620 225 H860" marker-end="url(#s2)"/>
+        <text class="t-sm halo" x="740" y="217" text-anchor="middle">4 progress / submit（perch board）</text><text class="t-sm" x="740" y="217" text-anchor="middle">4 progress / submit（perch board）</text>
+
+        <path class="ln" d="M620 270 H330" marker-end="url(#s1)"/>
+        <text class="t-sm halo" x="475" y="262" text-anchor="middle">5 异步回推 [Perch async update]</text><text class="t-sm" x="475" y="262" text-anchor="middle">5 异步回推 [Perch async update]</text>
+
+        <rect x="255" y="298" width="150" height="32" rx="6" class="box"/>
+        <text class="t-sm" x="330" y="319" text-anchor="middle">6 交叉核验、去重、证伪</text>
+
+        <path class="ln" d="M330 360 H620" marker-end="url(#s1)"/>
+        <text class="t-sm halo" x="475" y="352" text-anchor="middle">7 send 追问或修补：复用同一个 worker</text><text class="t-sm" x="475" y="352" text-anchor="middle">7 send 追问或修补：复用同一个 worker</text>
+
+        <path class="ln" d="M330 405 H110" marker-end="url(#s1)"/>
+        <text class="t-sm halo" x="220" y="397" text-anchor="middle">8 汇报：结论 + 两张表 + 风险</text><text class="t-sm" x="220" y="397" text-anchor="middle">8 汇报：结论 + 两张表 + 风险</text>
+
+        <path class="ln" d="M110 450 H330" marker-end="url(#s1)"/>
+        <text class="t-sm halo" x="220" y="442" text-anchor="middle">9 确认或追加要求</text><text class="t-sm" x="220" y="442" text-anchor="middle">9 确认或追加要求</text>
+
+        <path class="ln" d="M330 500 H620" marker-end="url(#s1)"/>
+        <text class="t-sm halo" x="475" y="492" text-anchor="middle">10 close 释放窗格（之后仍可 send 恢复）</text><text class="t-sm" x="475" y="492" text-anchor="middle">10 close 释放窗格（之后仍可 send 恢复）</text>
+      </svg>
+    </div>
+    <div class="scroll-hint">← 左右滑动查看完整时序图 →</div>
+    <figcaption>图 2　第 3、7 步可对多个 worker 并行操作；第 4 步仅限绑定了看板项的 worker。</figcaption>
+  </figure>
+
+  <h3>主控遵守的 6 条运行纪律</h3>
+  <div class="rules-grid">
+    <div class="rule-item"><span class="rule-num">1</span><div><strong>派发即结束，不轮询</strong><p><code>wait</code> 在 /perch 模式下永远是非阻塞探测，结果由异步回推唤醒。</p></div></div>
+    <div class="rule-item"><span class="rule-num">2</span><div><strong>同题先复用</strong><p>追问、补改、按评审意见修补都用 <code>send</code> 加短名找原 worker；独立评审才开新会话。</p></div></div>
+    <div class="rule-item"><span class="rule-num">3</span><div><strong>评审必须独立</strong><p>评审 worker 是干净的新会话；看板规则也禁止执行者评审自己的工作项。</p></div></div>
+    <div class="rule-item"><span class="rule-num">4</span><div><strong>汇报固定带两张表</strong><p>每次汇报含「正在做的任务」与「我做的决策」，再给关键取舍、风险与下一步。</p></div></div>
+    <div class="rule-item"><span class="rule-num">5</span><div><strong>结论标明证据等级</strong><p>区分已验证（附命令与输出）、静态核对、未验证；worker 口头回报只是线索。</p></div></div>
+    <div class="rule-item"><span class="rule-num">6</span><div><strong>高影响决定先问您</strong><p>方案定案、对外发布、扩大权限必须等您明确确认，内部复核通过不代替拍板。</p></div></div>
+  </div>
+</div>
+</section>
+
+<section id="roles">
+<div class="wrap">
+  <div class="sec-hd">
+    <span class="sec-kicker">04 · Roles</span>
+    <h2>角色分工目录</h2>
+    <p class="sec-desc">角色在配置里声明，决定每个 worker 使用的 provider、模型档位和行为约束。主控启动时只需传角色名，其余自动填充。模型档位可按需替换为您自己的模型。</p>
+  </div>
+
+  <div class="filter-bar" role="group" aria-label="按权限筛选角色">
+    <button type="button" class="pill-btn active" data-role-filter="all">全部角色</button>
+    <button type="button" class="pill-btn" data-role-filter="ro">只读查证 / 评审</button>
+    <button type="button" class="pill-btn" data-role-filter="rw">可写开发</button>
+    <button type="button" class="pill-btn" data-role-filter="auto">自动评审</button>
+  </div>
+
+  <div class="role-grid" id="roleGrid">
+    <div class="role-card" data-kind="ro">
+      <div class="role-top"><div class="role-names"><code>reader</code></div><span class="tag ro">只读</span></div>
+      <p>快速查代码、配置、文档并核对事实，返回结论附文件行号或命令输出。</p>
+      <div class="role-foot"><span>适用：日常事实核验、行号取证</span><span class="tag tier">低成本快速模型</span></div>
+    </div>
+    <div class="role-card" data-kind="rw">
+      <div class="role-top"><div class="role-names"><code>simple-worker</code> <code>worker</code> <code>complex-worker</code></div><span class="tag rw">可写</span></div>
+      <p>三档开发角色：单点机械改写；多文件实现并补测试；核心重构与并发改造。</p>
+      <div class="role-foot"><span>适用：按改动风险按档派发</span><span class="tag tier">由低到高三档</span></div>
+    </div>
+    <div class="role-card" data-kind="ro">
+      <div class="role-top"><div class="role-names"><code>investigate</code></div><span class="tag ro">只读</span></div>
+      <p>长上下文只读排查，输出完整根因链路与实证；只定位不顺手改代码。</p>
+      <div class="role-foot"><span>适用：复杂故障与跨仓链路</span><span class="tag tier">长上下文模型</span></div>
+    </div>
+    <div class="role-card" data-kind="ro">
+      <div class="role-top"><div class="role-names"><code>design-neon</code> <code>design-astra</code></div><span class="tag ro">只读</span></div>
+      <p>方案设计 A（收敛）与 B（推演对抗），重方案时盲写后互评一轮再收敛。</p>
+      <div class="role-foot"><span>适用：架构与接口设计</span><span class="tag tier">两个不同模型族</span></div>
+    </div>
+    <div class="role-card" data-kind="ro">
+      <div class="role-top"><div class="role-names"><code>review-neon</code> <code>review-sol</code></div><span class="tag ro">只读</span></div>
+      <p>独立代码审查：分别侧重结构与可行性、正确性与并发安全，避免自审盲区。</p>
+      <div class="role-foot"><span>适用：分支与 PR 审查</span><span class="tag tier">两个不同模型族</span></div>
+    </div>
+    <div class="role-card" data-kind="ro">
+      <div class="role-top"><div class="role-names"><code>advisor-*</code>（三位）</div><span class="tag ro">只读</span></div>
+      <p>问题卡住、连续受阻或方案僵持时按需求助，不限领域，只出思路不直接改代码。</p>
+      <div class="role-foot"><span>适用：破局与第二意见</span><span class="tag tier">三个强推理模型</span></div>
+    </div>
+    <div class="role-card" data-kind="auto">
+      <div class="role-top"><div class="role-names"><code>readability</code></div><span class="tag auto">自动评审</span></div>
+      <p>配置 <code>reviewMode: agent-end</code>，在主控长回复后自动检查可读性与结构；返回 <code>OK</code> 则静默。</p>
+      <div class="role-foot"><span>适用：长回复质量把关</span><span class="tag tier">快速模型</span></div>
+    </div>
+    <div class="role-card" data-kind="ro">
+      <div class="role-top"><div class="role-names"><code>writer</code></div><span class="tag ro">只读</span></div>
+      <p>撰写对外文本草稿（PR 描述、评审评论、变更说明），按模板出稿，不执行发布。</p>
+      <div class="role-foot"><span>适用：对外沟通文档</span><span class="tag tier">强写作模型</span></div>
+    </div>
+    <div class="role-card" data-kind="rw">
+      <div class="role-top"><div class="role-names"><code>fallback</code></div><span class="tag rw">可写</span></div>
+      <p>常规模型被误拦截或不可用时的兜底角色，仅在您明确确认后启用。</p>
+      <div class="role-foot"><span>适用：异常处理兜底</span><span class="tag tier">备用模型</span></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>展开查看完整实战配置示例（~/.omp/agent/config.yml · perch 段）</summary>
+    <div>
+      <p>以下是我们日常在用的完整角色配置示例（模型名与别名可按您账号实际可用模型替换，<code>agy models</code> 可查看 agy 可用模型）：</p>
+      <div class="code-block">
+        <div class="code-hd"><span>~/.omp/agent/config.yml · 实战配置示例</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code>modelRoles:
+  ultra: openai-codex/gpt-6.2-astra:medium
+  slow:  openai-codex/gpt-6.2-sol:medium
+  smol:  openai-codex/gpt-6.1-terra:xhigh
+  tiny:  openai-codex/gpt-6-luna:high
+
+perch:
+  default: false
+  native: true
+  layout: stack
+  heartbeatSeconds: 0
+  idleCloseSeconds: 300
+  discoverTimeoutMs: 40000
+  allowTools:
+    - perch
+    - board
+    - read
+    - ask
+  workerPromptPrefix: "[Worker 身份] 你是本次任务的专项执行 worker（不是总控/秘书）。请直接完成下列任务，不要再通过 perch 派生子会话；完成后返回紧凑摘要（结论、产物/改动路径、实跑验证证据、剩余风险）。"
+  board:
+    enabled: true
+    autoCreate: false
+  roles:
+    reader:
+      label: 轻量只读查证
+      provider: omp
+      model: "@tiny"
+      write: false
+      capabilities: 便宜快速只读查代码、查配置、读长文档、日常提问事实核验
+      constraints: 严格只读，不改代码；返回结论+文件:行号或命令实证
+    readability:
+      label: 输出整理与可读性顾问
+      provider: agy
+      model: gemini-3.8-flash-high
+      write: false
+      capabilities: 整理汇报结构、信息分层、对比排版与表达润色，提升用户阅读体验
+      constraints: 严格只读，不改代码不增删事实
+      reviewMode: agent-end
+      reviewMinChars: 500
+      reviewPrompt: &gt;-
+        按以下标准评审主控这条回复，只提可直接套用的修改，不改事实与证据：
+        1) 结论先行：第一段就给结论或需要用户做的决定；
+        2) 只有「状态/阶段汇报」才使用「正在做的任务」「我做的决策」两张表，普通回答不要强行套表；
+        3) 短段落、短句，一个段落只讲一件事，长篇解释改成分层小标题或列表；
+        4) 少用内部术语和缩写，必须用时第一次出现要说清含义；
+        5) 提到文件、PR、链接时给可点击的链接，不要只写裸路径；
+        6) 删掉重复、客套和对过程的复述，保留结论、依据、风险和下一步；
+        7) 需要用户拍板的问题放在最后并写清选项与代价。
+        若回复已经满足这些标准，只回复 OK。
+    writer:
+      label: 对外文本写手
+      provider: omp
+      model: "@slow"
+      write: false
+      capabilities: 写给他人的文本：MR 评论、PR 描述、发布公告、需求/方案摘要
+      constraints: 只产出草稿文本，不发布、不提交、不改文件；引用文件与行号须经实证
+    simple-worker:
+      label: 简单开发
+      provider: omp
+      model: "@tiny"
+      write: true
+      capabilities: 目标明确、单点/机械改写、有 spec
+      constraints: 写清目标文件、改动点与验收命令
+    worker:
+      label: 常规开发
+      provider: omp
+      model: "@smol"
+      write: true
+      capabilities: 中等逻辑、多文件实现、补单测
+      constraints: 交付须附实跑验证命令与输出
+    complex-worker:
+      label: 复杂开发
+      provider: omp
+      model: "@slow"
+      write: true
+      capabilities: 核心重构、并发/状态机、高风险改动
+      constraints: 优先基于已确认设计终稿实施
+    investigate:
+      label: 问题排查 / 根因定位
+      provider: agy
+      model: gemini-4-neon
+      write: false
+      capabilities: 长上下文只读排查、根因定位、多仓追踪
+      constraints: 严格只读排查，输出根因链路+文件:行号或日志实证，不改代码
+    design-neon:
+      label: 方案设计 A（架构/收敛）
+      provider: agy
+      model: gemini-4-neon
+      write: false
+      capabilities: 全局架构设计、结构简化、终稿收敛
+    design-astra:
+      label: 方案设计 B（推演/对抗）
+      provider: omp
+      model: "@ultra"
+      write: false
+      capabilities: 深度推演、并发/边界挑战、对抗互评
+    review-neon:
+      label: 代码审查 A（结构/可行性）
+      provider: agy
+      model: gemini-4-neon
+      write: false
+      capabilities: 可实施性、改动遗漏、过度设计审查
+    review-sol:
+      label: 代码审查 B（正确性/并发安全）
+      provider: omp
+      model: "@slow"
+      write: false
+      capabilities: 正确性、并发安全、锁与生命周期审查
+    advisor-sol:
+      label: 顾问
+      provider: omp
+      model: "@slow"
+      write: false
+      capabilities: 问题无法解决或卡住时按需请求协助
+      constraints: 严格只读协助，不改代码；针对卡点给出分析、破局思路或验证方案
+    advisor-neon:
+      label: 顾问
+      provider: agy
+      model: gemini-4-neon
+      write: false
+      capabilities: 问题无法解决或卡住时按需请求协助
+      constraints: 严格只读协助，不改代码；针对卡点给出分析、破局思路或验证方案
+    advisor-astra:
+      label: 顾问
+      provider: omp
+      model: "@ultra"
+      write: false
+      capabilities: 问题无法解决或卡住时按需请求协助
+      constraints: 严格只读协助，不改代码；针对卡点给出分析、破局思路或验证方案</code></pre>
+      </div>
+    </div>
+  </details>
+
+  <div class="callout warn"><p><strong>权限说明：</strong>角色的「只读」是写入 worker 提示词的行为约束，并非操作系统级沙箱。Perch 启动的 worker 默认运行在免逐项确认模式（如 omp <code>yolo</code>、agy <code>--dangerously-skip-permissions</code>），建议在可信仓库或独立 worktree 中使用。</p></div>
+</div>
+</section>
+
+<section id="sop">
+<div class="wrap">
+  <div class="sec-hd">
+    <span class="sec-kicker">05 · Playbooks</span>
+    <h2>七套标准协作流程</h2>
+    <p class="sec-desc">写在主控系统提示词 <code>PERCH_SYSTEM.md</code> 里，按任务类型自动匹配。点击场景标签查看具体做法与约束，或一键展开全部。</p>
+  </div>
+
+  <div class="sop-bar">
+    <div class="sop-tabs" role="tablist" aria-label="协作场景">
+      <button type="button" class="pill-btn active" role="tab" aria-selected="true" data-sop="qa">日常提问</button>
+      <button type="button" class="pill-btn" role="tab" aria-selected="false" data-sop="debug">问题排查</button>
+      <button type="button" class="pill-btn" role="tab" aria-selected="false" data-sop="design">方案设计</button>
+      <button type="button" class="pill-btn" role="tab" aria-selected="false" data-sop="dev">代码开发</button>
+      <button type="button" class="pill-btn" role="tab" aria-selected="false" data-sop="review">代码 Review</button>
+      <button type="button" class="pill-btn" role="tab" aria-selected="false" data-sop="help">卡住求助</button>
+      <button type="button" class="pill-btn" role="tab" aria-selected="false" data-sop="write">对外文本</button>
+    </div>
+    <button type="button" class="theme-btn" id="sopToggleAll">展开全部 7 套</button>
+  </div>
+
+  <div class="sop-list" id="sopList">
+    <article class="sop-panel" data-sop-panel="qa">
+      <div class="sop-panel-hd"><h3>日常提问与事实查证</h3><div class="sop-roles"><code>reader</code><code>worker（只读）</code></div></div>
+      <div class="sop-body">
+        <div class="sop-col"><h4>怎么做</h4><p>纯概念和方案讨论由主控直答；只要涉及代码实现、配置值或精确行号，立刻派 <code>reader</code> 查证，更深的跨文件链路派开发档位 worker 做只读核验。</p></div>
+        <div class="sop-col"><h4>关键约束</h4><div class="sop-guard">禁止凭记忆猜测代码事实；同一主题的追问复用同一个 worker，不反复起新会话。</div></div>
+      </div>
+    </article>
+
+    <article class="sop-panel" data-sop-panel="debug" hidden>
+      <div class="sop-panel-hd"><h3>问题排查与根因定位</h3><div class="sop-roles"><code>investigate</code></div></div>
+      <div class="sop-body">
+        <div class="sop-col"><h4>怎么做</h4><p>派 <code>investigate</code> 做长上下文只读定位；多轮深挖持续复用同一个 worker，只有在需要同时验证多个互斥假设时才并行派发。</p></div>
+        <div class="sop-col"><h4>关键约束</h4><div class="sop-guard">排查与修复严格分开：先回报根因链路、影响面与修复选项，经您确认后再派开发 worker 修改。</div></div>
+      </div>
+    </article>
+
+    <article class="sop-panel" data-sop-panel="design" hidden>
+      <div class="sop-panel-hd"><h3>方案设计与取舍收敛</h3><div class="sop-roles"><code>design-neon</code><code>design-astra</code></div></div>
+      <div class="sop-body">
+        <div class="sop-col"><h4>怎么做</h4><p>先澄清关键需求歧义。轻方案用一个设计 worker；重方案让两个不同模型族独立盲写，互评一轮，再由主控收敛成一份清晰方案。</p></div>
+        <div class="sop-col"><h4>关键约束</h4><div class="sop-guard">无法自动消解的分歧，必须列成「选项 + 代价 + 换选条件」交由您拍板。</div></div>
+      </div>
+    </article>
+
+    <article class="sop-panel" data-sop-panel="dev" hidden>
+      <div class="sop-panel-hd"><h3>代码开发与迭代交付</h3><div class="sop-roles"><code>simple-worker</code><code>worker</code><code>complex-worker</code></div></div>
+      <div class="sop-body">
+        <div class="sop-col"><h4>怎么做</h4><p>按改动复杂度与风险选择对应档位；需要并发改代码时使用独立 git worktree 或严格互不重叠的文件集合。</p></div>
+        <div class="sop-col"><h4>关键约束</h4><div class="sop-guard">交付必须附实跑验证命令与输出；后续补改或返工一律 <code>send</code> 复用原 worker。</div></div>
+      </div>
+    </article>
+
+    <article class="sop-panel" data-sop-panel="review" hidden>
+      <div class="sop-panel-hd"><h3>代码 Review 与问题闭环</h3><div class="sop-roles"><code>review-neon</code><code>review-sol</code></div></div>
+      <div class="sop-body">
+        <div class="sop-col"><h4>怎么做</h4><p>轻改派一个评审模型，中大改与核心链路派两个不同模型族并行盲审，再由主控交叉核验、去重与证伪。</p></div>
+        <div class="sop-col"><h4>关键约束</h4><div class="sop-guard">必须新开干净会话，开发 worker 不能自审；确认后的 P0/P1 问题交回原开发 worker 修复。</div></div>
+      </div>
+    </article>
+
+    <article class="sop-panel" data-sop-panel="help" hidden>
+      <div class="sop-panel-hd"><h3>卡住求助与破局</h3><div class="sop-roles"><code>advisor-sol</code><code>advisor-neon</code><code>advisor-astra</code></div></div>
+      <div class="sop-body">
+        <div class="sop-col"><h4>怎么做</h4><p>当排查连续受阻、方案陷入僵持或出现难以解释的边界现象时，按需请一位或并行请多位顾问从不同视角给思路。</p></div>
+        <div class="sop-col"><h4>关键约束</h4><div class="sop-guard">顾问严格只读、只给假设与验证路径；实际验证与落地交回原执行 worker。</div></div>
+      </div>
+    </article>
+
+    <article class="sop-panel" data-sop-panel="write" hidden>
+      <div class="sop-panel-hd"><h3>对外文本起草与发布</h3><div class="sop-roles"><code>reader</code><code>writer</code></div></div>
+      <div class="sop-body">
+        <div class="sop-col"><h4>怎么做</h4><p>先由 <code>reader</code> 核实精确行号与事实，再交 <code>writer</code> 按目标模板出稿，主控复核后先呈现给您审阅。</p></div>
+        <div class="sop-col"><h4>关键约束</h4><div class="sop-guard">未收到您明确说「提交」前绝不发布；真正发布动作交由指定 worker 执行。</div></div>
+      </div>
+    </article>
+  </div>
+
+  <details id="prompt-example">
+    <summary>展开查看完整实战主控提示词（~/.omp/agent/PERCH_SYSTEM.md）</summary>
+    <div>
+      <p>以下是我们日常在用的完整 <code>PERCH_SYSTEM.md</code> 示例，包含沟通边界、防过度设计三问、工具与复用纪律、看板规范及七套 SOP；末尾的 <code>{{roles}}</code> 会在启动时自动替换为 <code>config.yml</code> 中的角色表：</p>
+      <div class="code-block">
+        <div class="code-hd"><span>~/.omp/agent/PERCH_SYSTEM.md · 完整实战示例</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code># Perch 总控模式（秘书与多 Agent 编排）
+
+你处于 `/perch` 模式，担任用户的**研发总控与秘书**。你的职责是替用户把事情想清楚、拆分派发、盯住进度、交叉验收并做取舍，而不是自己埋头翻代码或当传话筒。
+
+---
+
+## 一、沟通风格、决策边界与防过度设计
+
+1. **像秘书一样沟通**：用「我」和「您」；结论先行、给建议、说清下一步；不转述「某 agent 认为 / 这个说的对」；有分歧直接给结论、依据和代价。
+2. **先查再问、主动推进**：能用工具确认的不问用户；完成一步明确说明下一步准备做什么。
+3. **决策边界**：实现细节与局部取舍直接拍板并记入决策表；**技术方案定案、删除/强推共享分支、发布、扩大权限或产品范围取舍**须先获用户确认（内部复核通过 ≠ 用户同意）。
+4. **输出整理与可读性优先**：`readability` 角色配置了 `reviewMode: agent-end`，您每次结束回复后（≥500 字）它会**自动评审**；若有改进建议会以 `[Perch review: readability]` 到达，请**优先遵循其结构与排版**重新回复一次（只优化表达，不改事实与证据）；回复已清晰时它不会打扰您。
+5. **每次状态/阶段汇报固定包含两张表**（先表后细节，不用散列堆信息）：
+   - **「正在做的任务」表**：任务名、角色/模型、看板项、当前阶段、预期产出。
+   - **「我做的决策」表**：决策内容、理由、代价。
+   - 同时给出：关键取舍、剩余风险、下一步建议。
+6. **防过度设计三问（评审门禁）**：拿到方案或改动后先自问——发现超标立刻要求 worker 收敛：
+   - 有没有存量机制可复用？
+   - 是不是为不存在的边界加分支？
+   - 改动规模（行数、文件数、新增概念）是否与问题规模匹配？
+
+---
+
+## 二、工具边界、委派纪律与角色路由
+
+- **主控工具已收窄（设计如此）**：`/perch` 模式下主控只保留 `perch`、`board`、`read`、`ask`，**不提供** `bash`、`edit`、`write`、`grep`、`glob`、`task`、`todo` 等开发/搜索/执行工具。只要涉及跑命令、查全仓代码、核对精确行号、改文件、跑测试或代码评审，**直接派 `perch` worker 完成**。
+- **主控 `read` 使用边界**：`read` 仅用于读短文档、模板、配置和交接报告；**严禁主控连续翻大源码文件，更禁止拿 `read` 折叠视图的行号当精确证据**（精确行号一律交 `reader` 用 `grep -n` 实证）。
+- **主控直接处理**：需求澄清、范围确认、读需求单/模板/轻量交接文档、管理看板与任务状态、整合裁决与汇报。
+- **必须委派给 `perch` worker**：代码调研、精确行号查证、问题排查、方案设计、代码开发与重构、测试验收、Code Review。
+- **严禁阻塞死等**：派发完立刻汇报表格并结束本轮，等待 `[Perch async update]` 自动唤醒；收到回调后立即检查结果并推进下一步，不得复读旧状态。
+- **盯住 `[Perch workspace view]` 及时清理闲置窗格**：用完的闲置窗格及时 `perch op=close` 释放（超过 `idleCloseSeconds` 也会自动关闭；后续随时可用 `op=send` 按原 `name` 自动拉起恢复）。
+- **优先复用同一个 worker（保持上下文连续性）**：
+  - 同一模块/主题的追问、补改、按评审意见修补，**优先复用原 worker**：`perch({ op: "send", id: "&lt;原简短 name&gt;", text: "..." })`。
+  - 即使该 worker 已经 `stopped` / `closed`，`op: "send"` 也会**自动恢复其历史会话并送达消息**。
+  - 只有**独立代码审查 / 独立验收 / 全新无关任务**才新开干净 worker（避免上下文污染）。
+- **调用规范（极简 4 招）**：
+  - 新派：`perch({ op: "start", role: "&lt;角色&gt;", name: "&lt;简短标签&gt;", cwd: "&lt;目录&gt;", prompt: "&lt;完整任务&gt;" })`（可选 `item` + `boardRole: "execute" | "review"` 绑定已有看板项）。
+  - 续接/自动恢复：`perch({ op: "send", id: "&lt;name 或 sessionId&gt;", text: "&lt;后续指令&gt;" })`（若报 `busy`，说明消息已拒绝未入队，等空闲回推后再发）。
+  - 查看状态/历史：`perch({ op: "list" })` / `perch({ op: "history", id: "&lt;name&gt;", limit: 10 })`。
+  - 关闭释放：`perch({ op: "close", id: "&lt;name&gt;" })`。
+
+### 可用角色表（单一事实源：`config.yml` `perch.roles`）
+
+{{roles}}
+
+---
+
+## 三、会话看板（`board`）协同规范
+
+- 用户可随时通过 `/board` 在侧栏打开网页看板查看全部工作项、验收标准、交接历史与决策。
+- **按需建项与绑定**：临时只读查询不建板；正式开发/复杂方案/多步交付任务用 `board op=create` 建工作项并在 `perch op=start` 传 `item` + `boardRole: "execute" | "review"` 绑定。
+- **决策记录**：重要结论用 `board op=decide`（`title` + `text`）或 `board op=progress`（跨人交接加 `handoff: true`）记录。
+- **回执 ≠ 提交/通过**：worker 结束时会自动记一条 `receipt` 回执，仅作为证据线索，主控须核对验收标准与实跑证据后再推进状态。
+- **独立验收原则**：执行者不能审查或验收自己的工作；需独立验收时，必须派干净的新 worker（`boardRole: "review"`）或由主控亲自核验。
+
+---
+
+## 四、七套标准协作 SOP
+
+1. **日常提问（主控直答 or `reader` / worker 查证）**：通用概念与讨论主控直答；涉及代码库/配置/精确行号**严禁猜测**，优先派 `reader`，深链路派开发档位 worker（注明只读不改代码）；追问 `op=send` 复用原 worker。
+2. **问题排查（`investigate` — 排查与修复严格分开）**：默认严格只读定位根因，产出根因链路与 `文件:行号`/日志实证；多轮深挖复用原 worker，仅互斥假设并行；先向用户汇报根因、影响面与选项，**不得顺手改代码**，确认后再派开发修复。
+3. **方案设计（轻/重分流）**：先澄清关键歧义；轻方案单个 `design-neon` 出稿并过三问；重方案 `design-neon` + `design-astra` 并行盲写 → 最多 1 轮对抗互评 → 收敛终稿，无法消解的分歧列「待拍板选项表（A vs B + 代价 + 换选条件）」交用户确认。
+4. **代码开发（`simple-worker` / `worker` / `complex-worker`）**：按复杂度选档；并发写代码必须分配独立 `git worktree` 或严格互不重叠的文件；迭代修补一律 `op=send` 复用原 worker，交付须附实跑命令与输出。
+5. **代码 Review（`review-neon` / `review-sol` — 轻/重分流）**：强制新开干净会话（**禁止自审**）；轻改单审，中大改/并发/安全/核心链路双模型并行盲审 → 交叉证伪去重；确认的 P0/P1 `op=send` 交回原开发 worker 修复。
+6. **顾问求助（`advisor-sol` / `advisor-neon` / `advisor-astra`）**：问题连续受阻或僵持时按需请求协助；打包目标、已尝试路径、失败日志与卡点；顾问只读出思路，验证与落地交回原执行 worker。
+7. **对外文本（`writer`）**：`reader` 先用 `grep -n` 核实行号 → `writer` 按模板出稿 → 主控核对后给用户看，**用户明确说「提交」才由 worker 发布**。
+
+---
+
+## 五、交接产物与三类验收结论
+
+- **共享产物目录**：多 agent 长文档统一落盘（不写凭据/密钥），要求 worker 回复保持 ≤300 字紧凑摘要。
+- **三类验收结论（严禁混淆）**：所有关键结论均须标明 `已验证`（附实跑命令与输出）/ `静态核对`（只读代码）/ `未验证`（写明缺少条件）。原执行者的口头回报只是线索，不是验收证据。</code></pre>
+      </div>
+    </div>
+  </details>
+</div>
+</section>
+
+<section id="mechanisms">
+<div class="wrap">
+  <div class="sec-hd">
+    <span class="sec-kicker">06 · Guardrails</span>
+    <h2>核心运行机制</h2>
+    <p class="sec-desc">不是靠口头提示词「希望模型听话」，而是用工具裁剪、环境变量、工作区视图和私有通信通道把流程固定下来。</p>
+  </div>
+  <div class="grid">
+    <div class="card"><h3>工具收窄</h3><p><code>perch.allowTools</code> 默认只保留 <code>perch</code>、<code>board</code>、<code>read</code>、<code>ask</code>。输入 <code>/perch off</code> 即刻恢复全部工具。</p></div>
+    <div class="card"><h3>防套娃隔离</h3><p>Perch 启动的 omp worker 自动携带 <code>PERCH_MANAGED_WORKER=1</code>，不会再次进入 /perch 模式，也不会被误收窄工具。</p></div>
+    <div class="card"><h3>短名续接与自动恢复</h3><p><code>send</code>、<code>history</code>、<code>wait</code>、<code>close</code> 均支持短名；对已关闭的 omp / agy worker 发 <code>send</code>，会自动重开窗格并续接原对话。</p></div>
+    <div class="card"><h3>实时工作区视图</h3><p>每轮上下文自动注入所有 worker 状态：运行中、待处理、闲置窗格与可恢复列表，主控不会遗漏收尾。</p></div>
+    <div class="card"><h3>闲置窗格自动回收</h3><p>配置 <code>idleCloseSeconds</code> 后，已确认处理完且闲置超时的窗格会自动关闭，随时仍可 <code>send</code> 唤醒。</p></div>
+    <div class="card"><h3>worker 看板写通道</h3><p>worker 可在 shell 用 <code>perch board</code> 更新自己被指派项的进展、提交与评审结论；经本机私有 socket 鉴权，只能改自己那一项。</p></div>
+    <div class="card"><h3>自动评审 reviewMode</h3><p>给任意角色加上 <code>reviewMode: agent-end</code>（或 <code>turn</code>），主控长回复后自动触发无头评审；返回 <code>OK</code> 静默，否则回推修订。</p></div>
+    <div class="card"><h3>非阻塞探测</h3><p>/perch 模式下 <code>wait</code> 永远即时返回，主控不会卡死在轮询上，由后台完成事件主动唤醒。</p></div>
+  </div>
+</div>
+</section>
+
+<section id="evidence">
+<div class="wrap">
+  <div class="sec-hd">
+    <span class="sec-kicker">07 · Field Notes</span>
+    <h2>真实工程会话数据</h2>
+    <p class="sec-desc">以下数据直接提取自同一工程仓库的两个真实会话 JSONL 日志（仓库、分支与文件名已脱敏），耗时为活动时间，不含人工离开空档。</p>
+  </div>
+
+  <div class="grid-2">
+    <div class="case-card">
+      <div class="case-hd">
+        <h3>案例 A · 多日复杂工程任务</h3>
+        <span class="tag tier">混合模式 + 看板驱动</span>
+      </div>
+      <div class="kpi-grid">
+        <div class="kpi"><b>114</b><span>用户消息</span></div>
+        <div class="kpi"><b>37</b><span>perch 调用（启 8 · 续 13 · 关 14 · 读 2）</span></div>
+        <div class="kpi"><b>133</b><span>看板操作（建 12 · 分 21 · 决 28 · 批 9）</span></div>
+        <div class="kpi"><b>11 次</b><span>同一个 reader 被复用与唤醒</span></div>
+      </div>
+      <p>先后调度 <code>reader</code>、<code>worker</code>、<code>complex-worker</code> 与 <code>review-sol</code>。同一个 <code>reader</code> 在多次关闭后仍被续接 11 次，避免重复探索上下文；开发与评审始终隔离在不同会话。</p>
+    </div>
+
+    <div class="case-card">
+      <div class="case-hd">
+        <h3>案例 B · 双模型分支审查与复审</h3>
+        <span class="tag ro">/perch 纯调度模式</span>
+      </div>
+      <div class="kpi-grid">
+        <div class="kpi"><b>4</b><span>用户消息（全流程低打扰）</span></div>
+        <div class="kpi"><b>59</b><span>perch 调用（启 10 · 续 23 · 关 20）</span></div>
+        <div class="kpi"><b>19</b><span>主控写入看板的进展记录</span></div>
+        <div class="kpi"><b>≈1h + 30m</b><span>首轮双审 · 隔夜更新后复审</span></div>
+      </div>
+      <p>用户仅发 4 条消息完成首轮双模型盲审与隔夜复审。主控并行驱动 <code>review-sol</code>（3 次）、<code>review-neon</code>（2 次）与 <code>reader</code>（5 次），输出带行号优先级清单与 HTML/Markdown 报告，并给出「暂不建议合并」结论。</p>
+    </div>
+  </div>
+
+  <div class="callout"><p><strong>理性看待数据：</strong>这两组记录验证了多 worker 复用、异步调度与看板留痕在真实研发中的可用性，但并非与单会话的严格对照实验。</p></div>
+</div>
+</section>
+
+<section id="adopt">
+<div class="wrap">
+  <div class="sec-hd">
+    <span class="sec-kicker">08 · Quick Start</span>
+    <h2>快速上手：在自己的环境用起来</h2>
+    <p class="sec-desc">先选一个适合当前阶段的起步档位，再按步骤安装、配置和试跑。</p>
+  </div>
+
+  <div class="callout warn"><p><strong>版本提示：</strong><code>/perch</code> 模式、<code>allowTools</code>、自动恢复与工作区视图目前在 beta 预发行版中，下面的一键安装命令带 <code>--beta</code> 即可获取；worker 写看板（<code>perch board</code>）与 <code>reviewMode</code> 正在 <a href="https://github.com/OhYee/perch/pull/15" target="_blank" rel="noopener">PR #15</a> 中，合并后随下一个 beta 发布。</p></div>
+
+  <h3>前置条件</h3>
+  <ul>
+    <li><strong>系统与运行环境：</strong>macOS 或 Linux；源码安装需 Node.js 22.13+ 与 npm。</li>
+    <li><strong>Agent CLI：</strong>已安装并登录 OMP（主控必需），以及至少一个 worker provider（omp / agy / codex / claude）。</li>
+    <li><strong>可见窗格（推荐）：</strong>安装 <a href="https://github.com/OhYee/perch#安装与要求" target="_blank" rel="noopener">terminal-pane</a> 与 Tern（右侧堆叠布局）；无窗格环境可将 <code>native</code> 设为 <code>false</code> 走后台会话。</li>
+  </ul>
+
+  <h3>选择起步档位</h3>
+  <div class="tier-cards" role="tablist" aria-label="上手档位">
+    <button type="button" class="tier-card active" role="tab" aria-selected="true" data-tier="min">
+      <strong>① 最小体验 · 10 分钟</strong>
+      <span>3 个基础角色（reader / worker / review），手动 <code>/perch on</code> 体验主控调度与可见窗格。</span>
+    </button>
+    <button type="button" class="tier-card" role="tab" aria-selected="false" data-tier="std">
+      <strong>② 标准日常 · 开发与双审</strong>
+      <span>加入第二模型族评审角色、<code>PERCH_SYSTEM.md</code> 协作纪律与闲置窗格自动回收。</span>
+    </button>
+    <button type="button" class="tier-card" role="tab" aria-selected="false" data-tier="full">
+      <strong>③ 完整团队 · 全套编排</strong>
+      <span>启用设计/顾问/写作角色、<code>readability</code> 自动评审与看板协作，默认开启 <code>/perch</code>。</span>
+    </button>
+  </div>
+
+  <div class="step-block" data-step="1">
+    <h3>安装 perch</h3>
+    <p>脚本只做一件事：按系统与 CPU 下载对应的独立二进制（无需 Node.js），用发布页的 <code>SHA256SUMS.txt</code> 校验后放到 <code>~/.local/bin/perch</code>。它<strong>不会</strong>改动任何 agent 的配置。之后用 <code>perch update</code> 升级。</p>
+    <div class="code-block">
+      <div class="code-hd"><span>bash · 安装 perch（含 /perch 能力的 beta 版）</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code>curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta</code></pre>
+    </div>
+    <details>
+      <summary>安装参数、先检查再执行、从源码安装</summary>
+      <div>
+        <p><strong>参数：</strong><code>--beta</code> 安装最新版（含预发行）；<code>--version 0.3.0</code> 安装指定版本；<code>--dir &lt;路径&gt;</code> 改安装目录（默认 <code>~/.local/bin</code>）。不带 <code>--beta</code> 时安装最新稳定版。</p>
+        <p><strong>先检查再执行：</strong><code>curl -fsSL https://ohyee.github.io/perch/install.sh -o install.sh</code>，看过内容后执行 <code>sh install.sh --beta</code>。脚本源码在 <a href="https://github.com/OhYee/perch/blob/main/docs/install.sh" target="_blank" rel="noopener">docs/install.sh</a>。</p>
+        <p><strong>从源码安装：</strong><code>git clone https://github.com/OhYee/perch.git &amp;&amp; cd perch &amp;&amp; npm ci --ignore-scripts &amp;&amp; ln -s "$PWD/cli.mjs" ~/.local/bin/perch</code>（需要 Node.js 22.13+）。</p>
+      </div>
+    </details>
+  </div>
+
+  <div class="step-block" data-step="2">
+    <h3>按需安装 agent 集成</h3>
+    <p>单独一步，只装您要用的那个。主控需要 OMP 扩展；用 agy 做 worker 时再装 agy 插件。目标文件已存在且不是 Perch 安装的会拒绝覆盖。</p>
+    <div class="code-block">
+      <div class="code-hd"><span>bash · 安装集成</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code>perch integration install omp   # OMP 扩展：/perch 模式、perch 与 board 工具
+perch integration install agy   # 可选：agy hook 插件</code></pre>
+    </div>
+  </div>
+
+  <div class="step-block" data-step="3">
+    <h3>写入 <code>~/.omp/agent/config.yml</code>（已按上方所选档位切换）</h3>
+    <p>请将 <code>&lt;...&gt;</code> 替换为您自己的模型名称；agy 可用模型可通过 <code>agy models</code> 查看。</p>
+
+    <div class="tier-panel" data-tier-panel="min">
+      <div class="code-block">
+        <div class="code-hd"><span>~/.omp/agent/config.yml · 最小体验（3 角色）</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code>modelRoles:
+  cheap: &lt;便宜快速的模型&gt;
+  strong: &lt;强推理的模型&gt;
+
+perch:
+  default: false           # 先手动 /perch on；顺手后再改 true
+  native: true             # 无窗格环境改 false
+  layout: stack            # 右侧自上而下堆叠（依赖 Tern）
+  allowTools: [perch, board, read, ask]
+  workerPromptPrefix: "你是专项执行 worker，不是总控。请直接完成任务，不要再通过 perch 派生子会话；完成后返回紧凑摘要（结论、改动路径、实跑验证证据、剩余风险）。"
+  roles:
+    reader:
+      provider: omp
+      model: "@cheap"
+      write: false
+      capabilities: 快速只读查代码、配置、文档，核对事实
+      constraints: 严格只读；返回结论附文件行号或命令输出
+    worker:
+      provider: omp
+      model: "@strong"
+      write: true
+      capabilities: 多文件实现并补测试
+      constraints: 交付必须附实跑验证命令与输出
+    review:
+      provider: omp
+      model: "@strong"
+      write: false
+      capabilities: 代码审查：正确性与并发安全
+      constraints: 严格只读；输出 文件:行号 + P0/P1/P2 + 根因 + 建议</code></pre>
+      </div>
+    </div>
+
+    <div class="tier-panel" data-tier-panel="std" hidden>
+      <div class="code-block">
+        <div class="code-hd"><span>~/.omp/agent/config.yml · 标准日常（双模型评审 + 自动回收）</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code>modelRoles:
+  cheap: &lt;便宜快速的模型&gt;
+  strong: &lt;强推理的模型&gt;
+
+perch:
+  default: false
+  native: true
+  layout: stack
+  idleCloseSeconds: 300    # 处理完且闲置 5 分钟自动关闭窗格，之后 send 可恢复
+  allowTools: [perch, board, read, ask]
+  workerPromptPrefix: "你是专项执行 worker，不是总控。请直接完成任务，不要再通过 perch 派生子会话；完成后返回紧凑摘要（结论、改动路径、实跑验证证据、剩余风险）。"
+  board:
+    enabled: true
+    autoCreate: false      # 仅正式任务手动建看板项
+  roles:
+    reader:
+      provider: omp
+      model: "@cheap"
+      write: false
+      capabilities: 快速只读查代码与配置，核对精确行号
+      constraints: 严格只读；附文件行号或命令输出
+    worker:
+      provider: omp
+      model: "@strong"
+      write: true
+      capabilities: 多文件实现并补测试
+      constraints: 交付必须附实跑验证命令与输出
+    investigate:
+      provider: agy
+      model: &lt;长上下文模型&gt;
+      write: false
+      capabilities: 长上下文只读排查，输出根因链路
+      constraints: 只定位不改代码
+    review-sol:
+      provider: omp
+      model: "@strong"
+      write: false
+      capabilities: 代码审查：正确性与并发安全
+      constraints: 严格只读；输出 文件:行号 + P0/P1/P2
+    review-neon:
+      provider: agy
+      model: &lt;另一模型族强模型&gt;
+      write: false
+      capabilities: 代码审查：架构、契约与边界条件
+      constraints: 严格只读；输出 文件:行号 + P0/P1/P2</code></pre>
+      </div>
+    </div>
+
+    <div class="tier-panel" data-tier-panel="full" hidden>
+      <div class="code-block">
+        <div class="code-hd"><span>~/.omp/agent/config.yml · 完整团队（含自动可读性评审）</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code>modelRoles:
+  cheap: &lt;便宜快速的模型&gt;
+  strong: &lt;强推理的模型&gt;
+  writer: &lt;强写作模型&gt;
+
+perch:
+  default: true            # 新会话默认进入 /perch（单仓可在 .omp/config.yml 关闭）
+  native: true
+  layout: stack
+  idleCloseSeconds: 300
+  allowTools: [perch, board, read, ask]
+  workerPromptPrefix: "你是专项执行 worker，不是总控。请直接完成任务，不要再通过 perch 派生子会话；完成后返回紧凑摘要（结论、改动路径、实跑验证证据、剩余风险）。"
+  board:
+    enabled: true
+    autoCreate: false
+  roles:
+    reader:        { provider: omp, model: "@cheap",  write: false, capabilities: 只读核验事实与行号 }
+    worker:        { provider: omp, model: "@strong", write: true,  capabilities: 多文件实现并补测试 }
+    investigate:   { provider: agy, model: &lt;长上下文模型&gt;, write: false, capabilities: 长上下文只读排障 }
+    design-neon:   { provider: agy, model: &lt;模型族A&gt;, write: false, capabilities: 方案设计（收敛） }
+    design-astra:  { provider: omp, model: "@strong", write: false, capabilities: 方案设计（推演对抗） }
+    review-sol:    { provider: omp, model: "@strong", write: false, capabilities: 审查：正确性与并发 }
+    review-neon:   { provider: agy, model: &lt;模型族A&gt;, write: false, capabilities: 审查：结构与契约 }
+    writer:        { provider: omp, model: "@writer", write: false, capabilities: 对外文档与 PR 描述草稿 }
+    readability:
+      provider: agy
+      model: &lt;快速模型&gt;
+      write: false
+      reviewMode: agent-end   # 需 PR #15；长回复后自动评审可读性
+      reviewMinChars: 500
+      reviewPrompt: "检查结论是否前置、结构是否清晰、有无冗余废话；无问题仅回复 OK。"</code></pre>
+      </div>
+    </div>
+
+    <details>
+      <summary>查看全部支持的 perch 配置项与提示词覆盖顺序</summary>
+      <div>
+        <p><strong>perch 段：</strong><code>default</code>、<code>native</code>、<code>layout</code>（<code>stack</code> / <code>right</code> / <code>tab</code>）、<code>heartbeatSeconds</code>、<code>idleCloseSeconds</code>、<code>discoverTimeoutMs</code>、<code>allowTools</code>、<code>disableTools</code>、<code>workerPromptPrefix</code>、<code>board.enabled</code>、<code>board.autoCreate</code>、<code>systemPrompt</code>、<code>appendSystemPrompt</code>、<code>roles</code>。</p>
+        <p><strong>角色字段：</strong><code>provider</code>（<code>omp</code> / <code>agy</code> / <code>codex</code> / <code>claude</code>）、<code>model</code>（支持 <code>@别名</code>）、<code>label</code>、<code>native</code>、<code>write</code>、<code>capabilities</code>、<code>constraints</code>、<code>promptPrefix</code>、<code>reviewMode</code>（<code>turn</code> / <code>agent-end</code>）、<code>reviewMinChars</code>、<code>reviewPrompt</code>。</p>
+        <p><strong>提示词优先级：</strong>项目 <code>.omp/config.yml</code> 的 <code>systemPrompt</code> &gt; 项目 <code>.omp/PERCH_SYSTEM.md</code> &gt; 全局 <code>config.yml</code> &gt; 全局 <code>~/.omp/agent/PERCH_SYSTEM.md</code> &gt; 内置极简默认。提示词中的 <code>{{roles}}</code> 会自动替换为角色表。</p>
+      </div>
+    </details>
+  </div>
+
+  <div class="step-block" data-step="4">
+    <h3>写入调度纪律（可选但强烈推荐）</h3>
+    <p>新建 <code>~/.omp/agent/PERCH_SYSTEM.md</code>，保留 <code>{{roles}}</code> 占位符让 Perch 自动注入角色表。下面是极简起步版；如需完整版（含七套 SOP 与防过度设计三问），可直接复制上方的 <a href="#prompt-example">完整实战主控提示词</a>：</p>
+    <div class="code-block">
+      <div class="code-hd"><span>~/.omp/agent/PERCH_SYSTEM.md</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code># Perch 总控模式
+
+你是研发总控，不是执行者。
+- 你只有 perch、board、read、ask 四个工具。查代码、跑命令、改文件、跑测试、做评审，一律派 worker。
+- 派发后立刻汇报并结束本轮，不要轮询；等 [Perch async update] 回推。
+- 同一主题的追问、补改，用 perch send 加原 worker 的短名复用；已关闭的会自动恢复。
+- 评审必须新开干净 worker，开发者不能自审。
+- 精确行号一律交 reader 用 grep -n 取证，不要凭折叠视图估算行号。
+- 每次汇报固定包含「正在做的任务」和「我做的决策」两张表，再给取舍、风险、下一步。
+- 结论标明：已验证（附命令与输出）/ 静态核对 / 未验证。
+- 方案定案、发布、扩大权限这类决定，先问用户。
+
+{{roles}}</code></pre>
+    </div>
+  </div>
+
+  <div class="step-block" data-step="5">
+    <h3>启动试跑</h3>
+    <p>打开主控，切入 <code>/perch</code> 模式，试发一条双模型评审或代码排查任务：</p>
+    <div class="code-block">
+      <div class="code-hd"><span>在 OMP 中运行</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code>omp                       # 启动 OMP（主控）
+/perch on                 # 进入 /perch 模式（/perch roles 查看角色表）
+review 当前分支相对主干的改动，高风险的地方请两个模型分别看</code></pre>
+    </div>
+    <p>常用命令：<code>/perch status</code> 查看 worker 状态 · <code>/perch close all</code> 关闭全部窗格 · <code>/perch off</code> 退回普通模式 · <code>/board</code> 打开本地看板网页。</p>
+  </div>
+
+  <div class="callout bad"><p><strong>安全建议：</strong>worker 默认以免逐项确认模式运行。请只在可信仓库或独立 worktree 中使用；不要把明文密钥写进任务描述；对外推送、发布、发评论等动作建议在纪律中要求「收到用户明确说提交后再执行」。</p></div>
+</div>
+</section>
+
+<section id="limits">
+<div class="wrap">
+  <div class="sec-hd">
+    <span class="sec-kicker">09 · Scope &amp; Limits</span>
+    <h2>适用边界与注意事项</h2>
+    <p class="sec-desc">在引入团队前，先了解当前的平台支持范围与能力边界，避免踩空预期。</p>
+  </div>
+  <div class="limits-grid">
+    <div class="limit-item"><strong>平台与窗格后端</strong>支持 macOS 与 Linux；右侧堆叠窗格目前在 Tern 上实现并实测。tmux、herdr 后端存在，但无窗格环境建议先设 <code>native: false</code>。</div>
+    <div class="limit-item"><strong>Provider 成熟度</strong>omp 与 agy 已在日常多会话中深度实测；Claude 的托管路径在仓库 README 中仍标注为待实机验证。</div>
+    <div class="limit-item"><strong>只读约束不是沙箱</strong>角色的 <code>write: false</code> 是提示词约束而非内核隔离；若需强隔离，请配合 git worktree、容器或 provider 自身权限机制。</div>
+    <div class="limit-item"><strong>自动评审的体验取舍</strong>开启 <code>reviewMode</code> 会增加一次轻量调用成本，且评审发生在主控回复之后；命中改写时会先看到初稿，数秒后看到修订稿。</div>
+  </div>
+</div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap footer-inner">
+    <span>项目源码与问题反馈：<a href="https://github.com/OhYee/perch" target="_blank" rel="noopener">github.com/OhYee/perch</a></span>
+    <span>更新于 2026-11-27 · 独立离线单页，零外部依赖</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement;
+
+  // Theme toggle (light / dark)
+  var themeBtn = document.getElementById('themeToggle');
+  function currentTheme() {
+    var attr = root.getAttribute('data-theme');
+    if (attr) return attr;
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  function syncThemeLabel() {
+    if (!themeBtn) return;
+    themeBtn.textContent = currentTheme() === 'dark' ? '☀ 浅色' : '☾ 深色';
+  }
+  syncThemeLabel();
+  if (themeBtn) {
+    themeBtn.addEventListener('click', function () {
+      root.setAttribute('data-theme', currentTheme() === 'dark' ? 'light' : 'dark');
+      syncThemeLabel();
+    });
+  }
+
+  // Reading progress bar & active nav highlight
+  var bar = document.getElementById('progressBar');
+  function updateProgress() {
+    if (!bar) return;
+    var h = document.documentElement.scrollHeight - window.innerHeight;
+    bar.style.width = h > 0 ? Math.min(100, Math.max(0, (window.scrollY / h) * 100)) + '%' : '0%';
+  }
+  window.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  var navLinks = Array.prototype.slice.call(document.querySelectorAll('#navLinks a'));
+  if ('IntersectionObserver' in window && navLinks.length) {
+    var byId = {};
+    navLinks.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        navLinks.forEach(function (a) { a.classList.remove('active'); });
+        var link = byId[entry.target.id];
+        if (link) link.classList.add('active');
+      });
+    }, { rootMargin: '-20% 0px -68% 0px', threshold: 0 });
+    document.querySelectorAll('main section[id]').forEach(function (sec) { io.observe(sec); });
+  }
+
+  // Role filter
+  var roleBtns = document.querySelectorAll('[data-role-filter]');
+  var roleCards = document.querySelectorAll('#roleGrid .role-card');
+  roleBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var kind = btn.getAttribute('data-role-filter');
+      roleBtns.forEach(function (b) { b.classList.toggle('active', b === btn); });
+      roleCards.forEach(function (card) {
+        card.hidden = kind !== 'all' && card.getAttribute('data-kind') !== kind;
+      });
+    });
+  });
+
+  // Interactive 7-SOP Explorer + Expand All toggle
+  var sopBtns = document.querySelectorAll('[data-sop]');
+  var sopPanels = document.querySelectorAll('[data-sop-panel]');
+  var sopToggleAll = document.getElementById('sopToggleAll');
+  var sopAllOpen = false;
+  var activeSop = 'qa';
+  function renderSop() {
+    sopPanels.forEach(function (panel) {
+      panel.hidden = !sopAllOpen && panel.getAttribute('data-sop-panel') !== activeSop;
+    });
+    sopBtns.forEach(function (btn) {
+      var isAct = !sopAllOpen && btn.getAttribute('data-sop') === activeSop;
+      btn.classList.toggle('active', isAct);
+      btn.setAttribute('aria-selected', isAct ? 'true' : 'false');
+    });
+    if (sopToggleAll) sopToggleAll.textContent = sopAllOpen ? '切回单页签' : '展开全部 7 套';
+  }
+  sopBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      sopAllOpen = false;
+      activeSop = btn.getAttribute('data-sop');
+      renderSop();
+    });
+  });
+  if (sopToggleAll) {
+    sopToggleAll.addEventListener('click', function () {
+      sopAllOpen = !sopAllOpen;
+      renderSop();
+    });
+  }
+
+  // Onboarding 3-Tier Switcher
+  var tierBtns = document.querySelectorAll('[data-tier]');
+  var tierPanels = document.querySelectorAll('[data-tier-panel]');
+  tierBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var t = btn.getAttribute('data-tier');
+      tierBtns.forEach(function (b) {
+        var on = b === btn;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      tierPanels.forEach(function (p) {
+        p.hidden = p.getAttribute('data-tier-panel') !== t;
+      });
+    });
+  });
+
+  // Animated 3-agent demo. Without JS (or with reduced motion) the final state stays visible.
+  (function () {
+    var demo = document.getElementById('demo');
+    if (!demo || !demo.animate) return;
+    var replayBtn = document.getElementById('demoReplay');
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      if (replayBtn) replayBtn.hidden = true;
+      return;
+    }
+    var wins = {
+      dir: document.getElementById('winDirector'),
+      sol: document.getElementById('winSol'),
+      neon: document.getElementById('winNeon')
+    };
+    var flow = document.getElementById('demoFlow');
+    var grid = document.getElementById('demoGrid');
+    var input = document.getElementById('dirInput');
+    var workersBadge = document.getElementById('demoWorkers');
+    var boardBadge = document.getElementById('demoBoard');
+    var phases = Array.prototype.slice.call(document.querySelectorAll('#demoPhases .demo-phase'));
+    var lines = Array.prototype.slice.call(demo.querySelectorAll('[data-at]'));
+    var userText = '审查当前分支相对主干的改动，高风险点请两个模型分别看';
+    var token = 0;
+    var visible = true;
+
+    if ('IntersectionObserver' in window) {
+      new IntersectionObserver(function (es) { visible = es[0].isIntersecting; }).observe(demo);
+    }
+    function sleep(ms, my) {
+      return new Promise(function (resolve, reject) {
+        var left = ms;
+        (function tick() {
+          if (my !== token) return reject('cancelled');
+          if (left <= 0) return resolve();
+          var step = Math.min(100, left);
+          setTimeout(function () {
+            if (visible && !document.hidden) left -= step;
+            tick();
+          }, step);
+        })();
+      });
+    }
+    function setState(win, cls, text) {
+      var el = win.querySelector('[data-state]');
+      el.className = 'wstate ' + cls;
+      el.textContent = text;
+    }
+    function setPhase(i) {
+      phases.forEach(function (p, k) {
+        p.classList.toggle('active', k === i);
+        p.classList.toggle('past', k < i);
+      });
+    }
+    function bump(el, text) {
+      el.textContent = text;
+      el.classList.add('bump');
+      setTimeout(function () { el.classList.remove('bump'); }, 300);
+    }
+    function pulse(win, cls) {
+      win.classList.add(cls);
+      setTimeout(function () { win.classList.remove(cls); }, 700);
+    }
+    function reveal(n) {
+      lines.forEach(function (el) {
+        if (Number(el.getAttribute('data-at')) === n) {
+          el.hidden = false;
+          var body = el.closest('.win-body');
+          if (body) body.scrollTop = body.scrollHeight;
+        }
+      });
+    }
+    function center(el) {
+      var r = el.getBoundingClientRect();
+      var base = demo.getBoundingClientRect();
+      return { x: r.left - base.left + r.width / 2, y: r.top - base.top + r.height / 2 };
+    }
+    function packet(fromEl, toEl, label, cls) {
+      var p = document.createElement('div');
+      p.className = 'packet' + (cls ? ' ' + cls : '');
+      p.textContent = label;
+      flow.appendChild(p);
+      var a = center(fromEl), b = center(toEl);
+      var w = p.offsetWidth / 2, h = p.offsetHeight / 2;
+      var anim = p.animate([
+        { transform: 'translate(' + (a.x - w) + 'px,' + (a.y - h) + 'px) scale(.6)', opacity: 0 },
+        { transform: 'translate(' + (a.x - w) + 'px,' + (a.y - h) + 'px) scale(1)', opacity: 1, offset: .15 },
+        { transform: 'translate(' + (b.x - w) + 'px,' + (b.y - h) + 'px) scale(1)', opacity: 1, offset: .85 },
+        { transform: 'translate(' + (b.x - w) + 'px,' + (b.y - h) + 'px) scale(.6)', opacity: 0 }
+      ], { duration: 1000, easing: 'cubic-bezier(.4,0,.2,1)' });
+      anim.onfinish = function () { p.remove(); };
+    }
+    function body(win) { return win.querySelector('.win-body'); }
+    function reset() {
+      lines.forEach(function (el) { el.hidden = true; });
+      flow.innerHTML = '';
+      input.innerHTML = '<span class="ph">输入需求…</span>';
+      setState(wins.dir, 'idle', 'idle');
+      setState(wins.sol, 'idle', '未启动');
+      setState(wins.neon, 'idle', '未启动');
+      grid.setAttribute('data-workers', '0');
+      wins.sol.classList.add('is-off');
+      wins.neon.classList.add('is-off');
+      workersBadge.textContent = '0 workers';
+      boardBadge.textContent = '/board · 0 updates';
+      setPhase(0);
+    }
+
+    async function run() {
+      var my = ++token;
+      reset();
+      try {
+        await sleep(700, my);
+        setState(wins.dir, 'run', '输入中');
+        for (var i = 1; i <= userText.length; i++) {
+          input.innerHTML = '';
+          input.appendChild(document.createTextNode(userText.slice(0, i)));
+          var cur = document.createElement('span');
+          cur.className = 'cursor';
+          input.appendChild(cur);
+          await sleep(55, my);
+        }
+        await sleep(500, my);
+        input.innerHTML = '<span class="ph">输入需求…</span>';
+        reveal(2); setState(wins.dir, 'run', '拆分中');
+        await sleep(900, my); reveal(3);
+        await sleep(900, my); setPhase(1); reveal(4);
+        // First worker splits a pane to the right of the director.
+        grid.setAttribute('data-workers', '1'); wins.sol.classList.remove('is-off');
+        setState(wins.sol, 'idle', '启动中'); bump(workersBadge, '1 worker');
+        await sleep(650, my); packet(body(wins.dir), body(wins.sol), 'perch start');
+        await sleep(900, my); reveal(5);
+        // Second worker stacks below the first one.
+        grid.setAttribute('data-workers', '2'); wins.neon.classList.remove('is-off');
+        setState(wins.neon, 'idle', '启动中'); bump(workersBadge, '2 workers');
+        await sleep(650, my); packet(body(wins.dir), body(wins.neon), 'perch start');
+        await sleep(700, my); reveal(6); setState(wins.dir, 'wait', '等待回推');
+        await sleep(400, my);
+        pulse(wins.sol, 'pulse'); pulse(wins.neon, 'pulse'); reveal(7);
+        setState(wins.sol, 'run', 'running'); setState(wins.neon, 'run', 'running');
+        await sleep(900, my); setPhase(2); reveal(8);
+        await sleep(800, my); reveal(9);
+        await sleep(800, my); reveal(10);
+        await sleep(900, my); reveal(11);
+        packet(body(wins.neon), boardBadge, 'board progress', 'orange');
+        await sleep(900, my); bump(boardBadge, '/board · 1 update'); reveal(12);
+        packet(body(wins.sol), boardBadge, 'board progress', 'orange');
+        await sleep(900, my); bump(boardBadge, '/board · 2 updates');
+        reveal(13); setState(wins.neon, 'done', 'done · 可 send 追问'); setPhase(3);
+        packet(body(wins.neon), body(wins.dir), 'async update', 'amber');
+        await sleep(1000, my); pulse(wins.dir, 'pulse-amber'); reveal(14);
+        await sleep(800, my); reveal(15);
+        await sleep(900, my); reveal(16); setState(wins.sol, 'done', 'done · 可 send 追问');
+        packet(body(wins.sol), body(wins.dir), 'async update', 'amber');
+        await sleep(1000, my); pulse(wins.dir, 'pulse-amber'); reveal(17);
+        await sleep(900, my); setPhase(4); setState(wins.dir, 'run', '汇总中'); reveal(18);
+        await sleep(900, my); reveal(19); setState(wins.dir, 'wait', '等您拍板');
+        await sleep(6000, my);
+        run();
+      } catch (e) { /* cancelled by replay */ }
+    }
+    if (replayBtn) replayBtn.addEventListener('click', run);
+    run();
+  })();
+
+  // One-click Copy buttons (works on both https and file://)
+  document.querySelectorAll('.copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var targetId = btn.getAttribute('data-copy-target');
+      var block = btn.closest('.code-block');
+      var codeEl = targetId ? document.getElementById(targetId) : (block && block.querySelector('pre code'));
+      if (!codeEl) return;
+      var text = codeEl.textContent;
+      var label = btn.getAttribute('data-label') || btn.textContent;
+      btn.setAttribute('data-label', label);
+      function done() {
+        btn.textContent = '已复制 ✓';
+        btn.classList.add('copied');
+        setTimeout(function () {
+          btn.textContent = label;
+          btn.classList.remove('copied');
+        }, 1600);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text, done); });
+      } else {
+        fallbackCopy(text, done);
+      }
+    });
+  });
+  function fallbackCopy(text, cb) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); cb(); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+})();
+</script>
+</body>
+</html>

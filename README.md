@@ -10,6 +10,27 @@
 
 所有方式都需要另行安装并配置所用的 OMP、Codex CLI、Claude Code 或 Antigravity CLI；pane 功能另需 `terminal-pane`，部分示例使用 `jq`。Perch 支持 macOS 和 Linux（Linux 二进制需要 glibc），不支持 Windows 原生运行。会话能力取决于提供方和终端，见下表；Claude 的托管路径尚未实机验证。
 
+### 一键安装
+
+分两步，每一步都可以单独检查。
+
+**第 1 步：安装 perch。** 脚本只做一件事：下载与当前系统、CPU 匹配的独立二进制（不需要 Node.js），用同一版本的 `SHA256SUMS.txt` 校验后安装为 `~/.local/bin/perch`，不修改任何 agent 的配置：
+
+```sh
+curl -fsSL https://ohyee.github.io/perch/install.sh | sh
+```
+
+常用参数：`--beta` 安装最新版（含预发行版）；`--version 0.3.0` 安装指定版本；`--dir <路径>` 改安装目录。传参时写成 `curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta`。脚本源码在 [docs/install.sh](docs/install.sh)，可以先下载检查再执行。
+
+**第 2 步：按需安装 agent 集成。** 只装您要用的那个；目标文件已存在且不是 Perch 安装的会拒绝覆盖：
+
+```sh
+perch integration install omp   # OMP 扩展：/perch 模式、perch 与 board 工具
+perch integration install agy   # 可选：agy hook 插件
+```
+
+介绍页面见 [ohyee.github.io/perch](https://ohyee.github.io/perch/)。
+
 ### 从 GitHub Release 安装
 
 在 [OhYee/perch Releases](https://github.com/OhYee/perch/releases) 选择版本。日常使用选 **Latest**；标有 **Pre-release** 的 `x.y.z-beta-<commit>` 是测试版。没有 Node.js 时选独立二进制；已有 Node.js 时可选单文件 `perch.mjs`，或用 npm 从发行包安装全局 `perch` 命令。
