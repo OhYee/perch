@@ -541,6 +541,41 @@ function safeSessionFile(ctx: ExtensionContext | undefined): string | undefined 
 }
 
 // Loaded explicitly or through the user's opt-in OMP integration.
+type CommandCompletion = { value: string; label: string; description?: string };
+
+const PERCH_SUBCOMMANDS: CommandCompletion[] = [
+  { value: 'on', label: 'on', description: 'Enable /perch orchestration mode' },
+  { value: 'off', label: 'off', description: 'Disable /perch mode and restore default tools' },
+  { value: 'toggle', label: 'toggle', description: 'Toggle /perch mode' },
+  { value: 'status', label: 'status', description: 'Show tracked workers' },
+  { value: 'roles', label: 'roles', description: 'Show configured roles' },
+  { value: 'close', label: 'close', description: 'Close worker panes: close <name> | all' },
+];
+
+/** Argument completions for `/perch`: subcommands, then worker names after `close`. Free-form prompts get none. */
+export function completePerchCommand(
+  prefix: string,
+  workers: Iterable<{ id: string; name?: string; state?: string }>,
+): CommandCompletion[] | null {
+  const close = /^close\s+(\S*)$/.exec(prefix);
+  if (close) {
+    const typed = close[1] ?? '';
+    const options: CommandCompletion[] = [{ value: 'all', label: 'all', description: 'Close every tracked worker pane' }];
+    const seen = new Set(['all']);
+    for (const worker of workers) {
+      const key = worker.name || worker.id;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      options.push({ value: key, label: key, description: worker.state ? `worker · ${worker.state}` : 'worker' });
+    }
+    const matches = options.filter(option => option.value.startsWith(typed));
+    return matches.length ? matches.map(option => ({ ...option, value: `close ${option.value}` })) : null;
+  }
+  if (/\s/.test(prefix)) return null;
+  const matches = PERCH_SUBCOMMANDS.filter(option => option.value.startsWith(prefix));
+  return matches.length ? matches : null;
+}
+
 export default function (pi: ExtensionAPI) {
   const uid = process.getuid?.();
   if (uid === undefined) return;
@@ -1562,6 +1597,7 @@ export default function (pi: ExtensionAPI) {
   if (!isManagedWorker && typeof anyPi.registerCommand === 'function') {
     anyPi.registerCommand('perch', {
       description: 'Toggle /perch orchestration mode, inspect workers/roles, or close worker panes',
+      getArgumentCompletions: (prefix: string) => completePerchCommand(prefix, tasks.values()),
       handler: async (rawArgs: string | undefined, ctx: ExtensionContext) => {
         if (isSubAgent(ctx)) throw new Error('/perch is only available in the main session.');
         const trimmed = (rawArgs ?? '').trim();

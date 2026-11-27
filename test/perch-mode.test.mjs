@@ -243,6 +243,10 @@ process.exit(0);
     sendUserMessage: async () => {},
   });
 
+  // /perch registers argument completions (subcommands; worker names after `close`)
+  assert.deepEqual(commands.get('perch').getArgumentCompletions('st').map(c => c.value), ['status']);
+  assert.deepEqual(commands.get('perch').getArgumentCompletions('close ').map(c => c.value), ['close all']);
+
   // 1. session_start auto-enables /perch mode from config.yml default:true and disables task
   await handlers.get('session_start')({}, ctx);
   assert.equal(activeTools.includes('task'), false);
