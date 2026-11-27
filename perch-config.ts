@@ -22,6 +22,8 @@ export type PerchRoleConfig = {
   reviewMinChars?: number;
   /** Detailed review criteria sent to the reviewer in addition to `capabilities` (only used with reviewMode). */
   reviewPrompt?: string;
+  /** Include the main session's persisted .jsonl file path in review requests (only used with reviewMode). */
+  reviewSessionFile?: boolean;
 };
 
 export type PerchBoardConfig = {
@@ -445,6 +447,7 @@ function parseRoleEntry(name: string, raw: unknown, modelRoles: Record<string, s
     ...(typeof obj.reviewPrompt === 'string' && obj.reviewPrompt.trim() ? { reviewPrompt: obj.reviewPrompt.trim().slice(0, 4000) } : {}),
     ...(typeof obj.reviewMinChars === 'number' && Number.isSafeInteger(obj.reviewMinChars) && obj.reviewMinChars >= 0 && obj.reviewMinChars <= 100000
       ? { reviewMinChars: obj.reviewMinChars } : {}),
+    ...(typeof obj.reviewSessionFile === 'boolean' ? { reviewSessionFile: obj.reviewSessionFile } : {}),
   };
 }
 
