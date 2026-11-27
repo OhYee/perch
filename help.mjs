@@ -23,6 +23,7 @@ const syntax = {
   view: ['perch view <id> [--lang zh|en]'],
   wait: ['perch wait <id> [--timeout seconds] [--json] [--lang zh|en]'],
   close: ['perch close <id> [--json] [--lang zh|en]'],
+  board: ['perch board <snapshot|progress|submit|approve|reject|decide|note_decision|replace> [--socket path] [--token token] [--text text | --stdin] [--item id] [--handoff] [--title title] [--decision id] [--revision N] [--target same|pool] [--items id,id] [--json] [--lang zh|en]'],
   integration: [
     'perch integration install omp [--json] [--lang zh|en]',
     'perch integration install agy [--json] [--lang zh|en]',
@@ -361,6 +362,33 @@ failed 1；interrupted 1。参数及其他错误也以 1 退出。
 needs_input 需要人工处理，不要自动批准请求。`,
       examples: `# 先将 id 设为支持 wait 的已有会话 ID。
 perch wait "$id" --timeout 300 --json`,
+    },
+  },
+  board: {
+    en: {
+      purpose: 'Read and update the session board item you were assigned (for Perch workers).',
+      details: `Run it from the worker shell with the --socket and --token printed in your Session Board access
+instructions (PERCH_BOARD_SOCKET and PERCH_BOARD_TOKEN are used when the flags are omitted).
+snapshot prints your item, acceptance criteria, handoffs and related decisions. progress records
+milestones (--handoff keeps them for the next worker). submit is for the executor; approve and reject
+are for the independent reviewer. decide, note_decision and replace manage decisions on your item.
+Only your own item can be changed, and BoardStore rules still apply. If the owning session has
+stopped, the command fails and you should report in your final reply.
+If the text starts with a dash, use --text="-1 failed" or --stdin (up to 200 KiB).`,
+      examples: `perch board snapshot --socket "$sock" --token "$token"
+perch board progress --socket "$sock" --token "$token" --text "ruled out cache" --handoff`,
+    },
+    zh: {
+      purpose: '读取并更新分配给您的会话看板项（供 Perch worker 使用）。',
+      details: `在 worker 的 shell 中使用，--socket 和 --token 见 Session Board access 说明
+（省略时使用环境变量 PERCH_BOARD_SOCKET 和 PERCH_BOARD_TOKEN）。
+snapshot 输出您的工作项、验收标准、交接记录和相关决策。progress 记录里程碑
+（--handoff 供下一位 worker 继承）。submit 由执行者使用；approve 和 reject 由独立评审者使用。
+decide、note_decision、replace 管理您工作项上的决策。只能修改自己的工作项，且仍受
+BoardStore 规则约束。所属会话已停止时命令会失败，请改为在最终回复里汇报。
+文本以短横线开头时请用 --text="-1 failed" 或 --stdin（最大 200 KiB）。`,
+      examples: `perch board snapshot --socket "$sock" --token "$token"
+perch board progress --socket "$sock" --token "$token" --text "已排除缓存" --handoff`,
     },
   },
   close: {

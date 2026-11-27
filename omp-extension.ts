@@ -2,7 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:net';
 import { existsSync, mkdirSync, lstatSync, chmodSync, openSync, writeFileSync, closeSync, realpathSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -11,6 +11,7 @@ import { systemLanguage } from './locale.mjs';
 import { translateDiagnostic } from './diagnostics.mjs';
 import { loadPerchConfig, renderPerchSystemPromptWithWarnings, renderRolesTable, type PerchModeConfig, type PerchRoleConfig } from './perch-config.ts';
 import { BoardStore, type Command, type ReceiptNotice } from './board/store.ts';
+import { createBoardBridge } from './board/bridge.ts';
 import { DiscussionFailure, summarizeDiscussion, type DiscussionModelContext } from './board/discussion.ts';
 import { startBoardWeb } from './board/web.ts';
 import {
@@ -364,6 +365,38 @@ function stageAgyNativePrompt(uid: number, text: string): string {
   return filePath;
 }
 
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function perchCommandLine(): string {
+  const [command, prefix] = resolvePerchInvocation();
+  return [command, ...prefix].map(shellQuote).join(' ');
+}
+
+function buildBoardWorkerGuide(commandLine: string, socket: string, token: string, role: 'execute' | 'review', itemId: string | undefined): string {
+  const base = `${commandLine} board <op> --socket ${shellQuote(socket)} --token ${token}`;
+  const ops = [
+    '  snapshot                         live item, acceptance criteria, handoffs and related decisions',
+    '  progress --text "..." [--handoff]   record milestones, confirmed/ruled-out findings, blockers (--handoff keeps it for the next worker)',
+    ...(role === 'execute'
+      ? ['  submit --text "evidence"          submit for independent review once the acceptance criteria are met']
+      : [
+        '  approve --text "evidence"         approve the item when it meets the criteria (you cannot review work you executed)',
+        '  reject --target same|pool --text "reason"   send it back to the same executor or the pool',
+      ]),
+    '  decide --title "..." --text "..." record a decision on your item',
+  ];
+  return [
+    '[Session Board access]',
+    `You are bound to board item ${itemId ?? '(assigned by the director)'} as ${role}. Read and update it from your shell (works in any provider):`,
+    `  ${base}`,
+    'Operations (each runs against your own item only; errors are printed and nothing is applied):',
+    ...ops,
+    'Use it at real milestones and before handoff, not for routine steps. Your final reply is recorded automatically but never submits or approves.',
+  ].join('\n');
+}
+
 function buildWorkerPrompt(
   rawPrompt: string,
   config: PerchModeConfig,
@@ -546,6 +579,14 @@ export default function (pi: ExtensionAPI) {
   const ownedSessions = new Set<string>();
   const tasks = new Map<string, TrackedTask>();
   const retiredWorkers = new Map<string, RetiredWorker>();
+  const boardBridge = createBoardBridge(uid);
+  const roleReviewers = new Map<string, string>();
+  const reviewsInFlight = new Set<string>();
+  const reviewControllers = new Set<AbortController>();
+  const lastReviewedHash = new Map<string, string>();
+  let lastUserPrompt = '';
+  let lastAssistantText = '';
+  let reviewSkipNext = false;
   const warnedPromptMessages = new Set<string>();
   const watchers = new Map<string, WatcherEntry>();
   const inFlightSends = new Set<string>();
@@ -1122,7 +1163,9 @@ export default function (pi: ExtensionAPI) {
   function rebindBoardForRevivedWorker(boardRoot: string | undefined, oldWorkerId: string, newWorkerId: string): string | undefined {
     if (!boardRoot) return undefined;
     try {
-      return withBoard(boardRoot, store => store.rebindWorker(oldWorkerId, newWorkerId), false);
+      const reboundItem = withBoard(boardRoot, store => store.rebindWorker(oldWorkerId, newWorkerId), false);
+      if (reboundItem) boardBridge.rebind(oldWorkerId, newWorkerId);
+      return reboundItem;
     } catch {
       return undefined;
     }
@@ -1404,8 +1447,107 @@ export default function (pi: ExtensionAPI) {
     sessionEpoch++;
     pendingLedgerAck = undefined;
     cancelAllWatchers();
+    for (const controller of reviewControllers) controller.abort();
+    reviewControllers.clear();
     pause();
     await Promise.allSettled(admissions);
+  }
+
+  // ---- Role reviewers: perch.roles.<name>.reviewMode = turn | agent-end ----
+  function assistantText(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    return content
+      .flatMap(part => part && typeof part === 'object' && (part as { type?: string }).type === 'text' && typeof (part as { text?: unknown }).text === 'string'
+        ? [(part as { text: string }).text] : [])
+      .join('\n');
+  }
+
+  async function runRoleReview(ctx: ExtensionContext, config: PerchModeConfig, role: PerchRoleConfig, replyText: string, epoch: number) {
+    const controller = new AbortController();
+    reviewControllers.add(controller);
+    try {
+      const prompt = [
+        `[Perch review request — role: ${role.name}${role.label ? ` / ${role.label}` : ''}]`,
+        'You are a reviewer, not the director. Review ONLY the director reply below through this lens: '
+          + `${role.capabilities ?? role.label ?? role.name}.`,
+        ...(role.constraints ? [`Constraints: ${role.constraints}`] : []),
+        ...(role.reviewPrompt ? [`Review criteria:\n${role.reviewPrompt}`] : []),
+        'Do not modify files, run commands, or add facts. If no change is needed, reply with exactly: OK',
+        'Otherwise reply with concise, concrete suggestions the director can apply directly (at most about 1200 characters).',
+        '',
+        '[User request]',
+        clipText(lastUserPrompt || '(unavailable)', 2000).text,
+        '',
+        '[Director reply to review]',
+        clipText(replyText, 12000).text,
+      ].join('\n');
+
+      const send = (target: string) => runPerchCli(['send', target, '--stdin', '--json'], { input: prompt, signal: controller.signal, timeoutMs: 120000 });
+      let id = roleReviewers.get(role.name);
+      let sent = id ? await send(id) : undefined;
+      if (!id || !sent || sent.code !== 0) {
+        const args = ['start', role.provider, '--cwd', ctx.cwd, '--json'];
+        if (role.model) args.push('--model', role.model);
+        const started = await runPerchCli(args, { signal: controller.signal, timeoutMs: 45000 });
+        if (started.code !== 0) throw new Error(cliErrorMessage(started, 'review session start failed'));
+        const parsed = parseJson(started.stdout) as { id?: string } | undefined;
+        if (!parsed?.id) throw new Error('review session start did not return an ID');
+        id = parsed.id;
+        roleReviewers.set(role.name, id);
+        ownedSessions.add(id);
+        sent = await send(id);
+        if (sent.code !== 0) throw new Error(cliErrorMessage(sent, 'review send failed'));
+      }
+      const waited = await runPerchCli(['wait', id, '--json'], { signal: controller.signal, timeoutMs: 600000 });
+      let status: string | undefined;
+      try { status = (parseJson(waited.stdout) as { status?: string } | undefined)?.status; } catch {}
+      if (stopping || controller.signal.aborted || epoch !== sessionEpoch || (status !== undefined && status !== 'completed')) return;
+      const reply = (await readLatestAssistantReply(id, controller.signal, 5000))?.trim();
+      if (stopping || controller.signal.aborted || epoch !== sessionEpoch) return;
+      if (!reply || /^OK[.!。]?$/i.test(reply)) return;
+      reviewSkipNext = true;
+      const clipped = clipText(reply, MAX_NOTIFICATION_CHARS);
+      pushAgentEvent('perch-review-note', [
+        `[Perch review: ${role.name}] (${role.reviewMode})`,
+        'Reviewer suggestions for your last reply:',
+        clipped.text,
+        'Action: apply the suggestions that improve the reply (expression and structure only; keep facts and evidence unchanged). Then output ONLY the complete revised reply for the user — do not mention this review, the reviewer, or what you changed. Ignore suggestions you disagree with.',
+      ].join('\n'), { role: role.name, mode: role.reviewMode, reviewer: id });
+    } catch (error) {
+      if (stopping || controller.signal.aborted) return;
+      const warning = `Perch review by ${role.name} failed: ${error instanceof Error ? error.message : String(error)}`;
+      if (!warnedPromptMessages.has(warning)) {
+        warnedPromptMessages.add(warning);
+        ctx.ui?.notify?.(warning, 'warning');
+      }
+    } finally {
+      reviewControllers.delete(controller);
+    }
+  }
+
+  async function maybeReviewReply(ctx: ExtensionContext, mode: 'turn' | 'agent-end', replyText: string) {
+    if (stopping || !perchModeEnabled || isManagedWorker || isSubAgent(ctx)) return;
+    const text = replyText.trim();
+    if (!text) return;
+    const config = loadPerchConfig({ cwd: ctx.cwd });
+    const roles = Object.values(config.roles).filter(role => role.reviewMode === mode);
+    if (!roles.length) return;
+    if (reviewSkipNext) {
+      // This reply answers a review note; do not review the revision again.
+      reviewSkipNext = false;
+      return;
+    }
+    const epoch = sessionEpoch;
+    for (const role of roles) {
+      if (text.length < (role.reviewMinChars ?? 0)) continue;
+      if (reviewsInFlight.has(role.name)) continue;
+      const hash = createHash('sha256').update(`${role.name}\0${text}`).digest('hex');
+      if (lastReviewedHash.get(role.name) === hash) continue;
+      lastReviewedHash.set(role.name, hash);
+      reviewsInFlight.add(role.name);
+      void runRoleReview(ctx, config, role, text, epoch).finally(() => reviewsInFlight.delete(role.name));
+    }
   }
 
   pi.registerCommand('perch-reconnect', {
@@ -1811,7 +1953,28 @@ export default function (pi: ExtensionAPI) {
             }
           }
 
+          let boardGrantToken: string | undefined;
+          if (shouldBindBoard && boardRoot) {
+            try {
+              const boardRole = params.boardRole ?? 'execute';
+              const socket = await boardBridge.ensure();
+              boardGrantToken = boardBridge.mint(boardRoot, reservedItemId ?? '', boardRole);
+              boardContextPrompt = [
+                boardContextPrompt,
+                buildBoardWorkerGuide(perchCommandLine(), socket, boardGrantToken, boardRole, reservedItemId),
+              ].filter(Boolean).join('\n\n');
+            } catch (error) {
+              boardGrantToken = undefined;
+              const warning = `Perch board access is unavailable for this worker: ${error instanceof Error ? error.message : String(error)}`;
+              if (!warnedPromptMessages.has(warning)) {
+                warnedPromptMessages.add(warning);
+                ctx.ui?.notify?.(warning, 'warning');
+              }
+            }
+          }
+
           const failBoardReservation = (reason: string) => {
+            if (boardGrantToken) boardBridge.revoke(boardGrantToken);
             if (boardToken && boardRoot) {
               try {
                 withBoard(boardRoot, store => {
@@ -1824,7 +1987,9 @@ export default function (pi: ExtensionAPI) {
           const commitBoardReservation = (workerId: string): string | undefined => {
             if (!boardToken || !boardRoot) return undefined;
             withBoard(boardRoot, store => store.commitSpawn(boardToken!, workerId));
-            return withBoard(boardRoot, store => store.bindingForWorker(workerId)?.item, false) ?? reservedItemId;
+            const bound = withBoard(boardRoot, store => store.bindingForWorker(workerId)?.item, false) ?? reservedItemId;
+            if (boardGrantToken) boardBridge.bind(boardGrantToken, workerId, bound);
+            return bound;
           };
 
           const effectivePrompt = params.prompt !== undefined
@@ -2273,8 +2438,14 @@ export default function (pi: ExtensionAPI) {
 
   pi.on('message_end', (event, ctx) => {
     if (isManagedWorker || isSubAgent(ctx)) return;
-    const msg = (event as { message?: { role?: string; stopReason?: string } })?.message;
+    const msg = (event as { message?: { role?: string; stopReason?: string; content?: unknown } })?.message;
     if (msg?.role !== 'assistant') return;
+
+    const replyText = assistantText(msg.content).trim();
+    if (replyText) lastAssistantText = replyText;
+    if (replyText && (msg.stopReason === 'stop' || msg.stopReason === 'toolUse')) {
+      void maybeReviewReply(ctx, 'turn', replyText);
+    }
 
     if (pendingLedgerAck) {
       const delivered = pendingLedgerAck;
@@ -2321,6 +2492,12 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (isManagedWorker) return;
+
+    if (!(event as { willContinue?: boolean })?.willContinue && lastAssistantText) {
+      const finalReply = lastAssistantText;
+      lastAssistantText = '';
+      void maybeReviewReply(ctx, 'agent-end', finalReply);
+    }
 
     const root = safeSessionFile(ctx);
     if (!root) return;
@@ -2469,6 +2646,11 @@ export default function (pi: ExtensionAPI) {
 
     await ensureToolActiveInVibe(ctx);
     if (isManagedWorker) return;
+
+    if (typeof ev.prompt === 'string' && ev.reason !== 'revive' && !/^\s*\[Perch /.test(ev.prompt)) {
+      lastUserPrompt = ev.prompt;
+    }
+    lastAssistantText = '';
 
     const config = loadPerchConfig({ cwd: ctx.cwd });
     if (perchModeEnabled) {
@@ -2728,6 +2910,9 @@ export default function (pi: ExtensionAPI) {
 
     const toClose = [...ownedSessions];
     ownedSessions.clear();
+    roleReviewers.clear();
+    reviewsInFlight.clear();
+    lastReviewedHash.clear();
     tasks.clear();
     retiredWorkers.clear();
     warnedPromptMessages.clear();
@@ -2735,6 +2920,7 @@ export default function (pi: ExtensionAPI) {
     if (toClose.length) {
       await Promise.allSettled(toClose.map(id => runPerchCli(['close', id, '--json'], { timeoutMs: 3000 }).catch(() => {})));
     }
+    boardBridge.close();
     server?.close();
     try { unlinkSync(path); } catch {}
   });

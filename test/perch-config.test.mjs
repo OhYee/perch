@@ -62,6 +62,22 @@ perch:
   assert.equal(parsed.perch.roles['complex-dev'].model, '@slow');
 });
 
+test('parseYaml understands flow lists and maps people write in config.yml', () => {
+  const parsed = parseYaml(`
+perch: { default: false, layout: stack }
+other:
+  allowTools: [perch, board, "read", 'ask']
+  empty: []
+  nested: { a: [1, 2], b: { c: true }, d: "x, y" }
+  json: ["a", "b"]
+`);
+  assert.deepEqual(parsed.perch, { default: false, layout: 'stack' });
+  assert.deepEqual(parsed.other.allowTools, ['perch', 'board', 'read', 'ask']);
+  assert.deepEqual(parsed.other.empty, []);
+  assert.deepEqual(parsed.other.nested, { a: [1, 2], b: { c: true }, d: 'x, y' });
+  assert.deepEqual(parsed.other.json, ['a', 'b']);
+});
+
 test('resolveModelAlias expands chained @aliases and guards cycles', () => {
   const roles = {
     a: '@b',

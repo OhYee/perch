@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { access, lstat, mkdir, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { connect } from 'node:net';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseLanguage } from './locale.mjs';
@@ -455,10 +456,52 @@ async function run([command, ...args]) {
   else if (command === 'input') Object.assign(options, { key: opt('string'), enter: opt() });
   else if (command === 'start') Object.assign(options, { cwd: opt('string'), model: opt('string'), resume: opt('string'), executable: opt('string'), native: opt(), pane: opt('string'), split: opt('string'), target: opt('string'), workspace: opt('string'), tab: opt('string') });
   else if (command === 'wait') options.timeout = opt('string');
+  else if (command === 'board') Object.assign(options, { socket: opt('string'), token: opt('string'), item: opt('string'), text: opt('string'), stdin: opt(), handoff: opt(), title: opt('string'), decision: opt('string'), revision: opt('string'), target: opt('string'), items: opt('string') });
   else if (!['resume', 'close', 'integration', 'view', 'version', 'update'].includes(command)) throw Error(tr(`Unknown command: ${quote(command)}\n${rootHelp}`, `未知命令：${quote(command)}\n${rootHelp}`));
   let values, positionals;
   try { ({ values, positionals } = parseArgs({ args: command === 'start' ? beforeBoundary : args, options, allowPositionals: true })); }
   catch (error) { throw argumentError(error); }
+  if (command === 'board') {
+    const [op, ...extra] = positionals;
+    if (!op || extra.length) throw Error(help);
+    const socketPath = values.socket ?? process.env.PERCH_BOARD_SOCKET;
+    const token = values.token ?? process.env.PERCH_BOARD_TOKEN;
+    if (!socketPath || !token) throw Error(tr('board needs --socket and --token (see the Session Board access instructions you were given)', 'board 需要 --socket 和 --token（见您收到的 Session Board access 说明）'));
+    let text = values.text;
+    if (values.stdin) {
+      if (process.stdin.isTTY) throw Error(tr('--stdin expects piped or redirected text', '--stdin 需要管道或重定向输入'));
+      text = (await readStdin(200 * 1024, tr('Board text exceeds 200 KiB', 'board 文本超过 200 KiB'))).toString('utf8');
+    }
+    if (values.revision !== undefined && !/^\d+$/.test(values.revision)) throw Error(tr('--revision must be a non-negative integer', '--revision 必须是非负整数'));
+    const request = {
+      token, op,
+      ...(text !== undefined ? { text } : {}),
+      ...(values.item !== undefined ? { item: values.item } : {}),
+      ...(values.handoff ? { handoff: true } : {}),
+      ...(values.title !== undefined ? { title: values.title } : {}),
+      ...(values.decision !== undefined ? { decision: values.decision } : {}),
+      ...(values.revision !== undefined ? { revision: Number(values.revision) } : {}),
+      ...(values.target !== undefined ? { target: values.target } : {}),
+      ...(values.items !== undefined ? { items: values.items.split(',').map(entry => entry.trim()).filter(Boolean) } : {}),
+    };
+    const response = await new Promise((resolveResponse, reject) => {
+      const socket = connect(socketPath);
+      let data = '';
+      socket.setEncoding('utf8');
+      socket.setTimeout(30000, () => { socket.destroy(); reject(Error(tr('board request timed out', 'board 请求超时'))); });
+      socket.on('error', error => reject(Error(['ENOENT', 'ECONNREFUSED'].includes(error?.code)
+        ? tr('board is unavailable (the owning session is no longer running); report your result in your final reply instead', 'board 不可用（所属会话已不在运行）；请改为在最终回复里汇报结果')
+        : tr(`board connection failed: ${error?.message ?? 'unknown error'}`, `board 连接失败：${error?.message ?? '未知错误'}`))));
+      socket.on('connect', () => socket.write(`${JSON.stringify(request)}\n`));
+      socket.on('data', chunk => { data += chunk; });
+      socket.on('end', () => {
+        try { resolveResponse(JSON.parse(data.trim())); } catch { reject(Error(tr('Invalid board response', 'board 响应无效'))); }
+      });
+    });
+    if (!response?.ok) throw Error(typeof response?.error === 'string' ? response.error : tr('board request failed', 'board 请求失败'));
+    if (values.json) return json(response.result);
+    return console.log(typeof response.result?.text === 'string' ? response.result.text : JSON.stringify(response.result, null, 2));
+  }
   if (command === 'version' || command === 'update') {
     if (positionals.length) throw Error(tr(`${command} takes no positional arguments`, `${command} 不接受位置参数`));
     const version = await getVersion();
