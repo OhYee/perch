@@ -12,13 +12,24 @@
 
 ### 一键安装
 
-下载与当前系统、CPU 匹配的独立二进制（不需要 Node.js），用同一版本的 `SHA256SUMS.txt` 校验后安装为 `~/.local/bin/perch`：
+分两步，每一步都可以单独检查。
+
+**第 1 步：安装 perch。** 脚本只做一件事：下载与当前系统、CPU 匹配的独立二进制（不需要 Node.js），用同一版本的 `SHA256SUMS.txt` 校验后安装为 `~/.local/bin/perch`，不修改任何 agent 的配置：
 
 ```sh
 curl -fsSL https://ohyee.github.io/perch/install.sh | sh
 ```
 
-常用参数：`--beta` 安装最新版（含预发行版）；`--version 0.3.0` 安装指定版本；`--dir <路径>` 改安装目录；`--with-omp`、`--with-agy` 安装后执行对应的 `perch integration install`。传参时写成 `curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta --with-omp`。脚本源码在 [docs/install.sh](docs/install.sh)，可以先下载检查再执行。介绍页面见 [ohyee.github.io/perch](https://ohyee.github.io/perch/)。
+常用参数：`--beta` 安装最新版（含预发行版）；`--version 0.3.0` 安装指定版本；`--dir <路径>` 改安装目录。传参时写成 `curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta`。脚本源码在 [docs/install.sh](docs/install.sh)，可以先下载检查再执行。
+
+**第 2 步：按需安装 agent 集成。** 只装您要用的那个；目标文件已存在且不是 Perch 安装的会拒绝覆盖：
+
+```sh
+perch integration install omp   # OMP 扩展：/perch 模式、perch 与 board 工具
+perch integration install agy   # 可选：agy hook 插件
+```
+
+介绍页面见 [ohyee.github.io/perch](https://ohyee.github.io/perch/)。
 
 ### 从 GitHub Release 安装
 

@@ -668,7 +668,7 @@ footer{
     </div>
 
     <div class="hero-install">
-      <code id="heroInstallCmd">curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta --with-omp --with-agy</code>
+      <code id="heroInstallCmd">curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta</code>
       <button type="button" class="copy-btn" data-copy-target="heroInstallCmd">复制安装命令</button>
     </div>
 
@@ -1414,23 +1414,33 @@ perch:
   </div>
 
   <div class="step-block" data-step="1">
-    <h3>一键安装 perch 与 Agent 集成</h3>
-    <p>脚本会按系统与 CPU 下载对应的独立二进制（无需 Node.js），用发布页的 <code>SHA256SUMS.txt</code> 校验后放到 <code>~/.local/bin/perch</code>，并按参数安装 OMP 扩展与 agy 插件。之后用 <code>perch update</code> 升级。</p>
+    <h3>安装 perch</h3>
+    <p>脚本只做一件事：按系统与 CPU 下载对应的独立二进制（无需 Node.js），用发布页的 <code>SHA256SUMS.txt</code> 校验后放到 <code>~/.local/bin/perch</code>。它<strong>不会</strong>改动任何 agent 的配置。之后用 <code>perch update</code> 升级。</p>
     <div class="code-block">
-      <div class="code-hd"><span>bash · 一键安装（含 /perch 能力的 beta 版）</span><button type="button" class="copy-btn">复制</button></div>
-<pre><code>curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta --with-omp --with-agy</code></pre>
+      <div class="code-hd"><span>bash · 安装 perch（含 /perch 能力的 beta 版）</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code>curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta</code></pre>
     </div>
     <details>
-      <summary>安装参数与其他安装方式</summary>
+      <summary>安装参数、先检查再执行、从源码安装</summary>
       <div>
-        <p><strong>参数：</strong><code>--beta</code> 安装最新版（含预发行）；<code>--version 0.3.0</code> 安装指定版本；<code>--dir &lt;路径&gt;</code> 改安装目录（默认 <code>~/.local/bin</code>）；<code>--with-omp</code> / <code>--with-agy</code> 安装后执行对应的 <code>perch integration install</code>。不带 <code>--beta</code> 时安装最新稳定版。</p>
-        <p><strong>先看再跑：</strong>可以先 <code>curl -fsSL https://ohyee.github.io/perch/install.sh -o install.sh</code> 检查内容后再执行 <code>sh install.sh --beta</code>。</p>
-        <p><strong>从源码安装：</strong><code>git clone https://github.com/OhYee/perch.git &amp;&amp; cd perch &amp;&amp; npm ci --ignore-scripts &amp;&amp; ln -s "$PWD/cli.mjs" ~/.local/bin/perch</code>（需要 Node.js 22.13+），然后执行 <code>perch integration install omp</code>。</p>
+        <p><strong>参数：</strong><code>--beta</code> 安装最新版（含预发行）；<code>--version 0.3.0</code> 安装指定版本；<code>--dir &lt;路径&gt;</code> 改安装目录（默认 <code>~/.local/bin</code>）。不带 <code>--beta</code> 时安装最新稳定版。</p>
+        <p><strong>先检查再执行：</strong><code>curl -fsSL https://ohyee.github.io/perch/install.sh -o install.sh</code>，看过内容后执行 <code>sh install.sh --beta</code>。脚本源码在 <a href="https://github.com/OhYee/perch/blob/main/docs/install.sh" target="_blank" rel="noopener">docs/install.sh</a>。</p>
+        <p><strong>从源码安装：</strong><code>git clone https://github.com/OhYee/perch.git &amp;&amp; cd perch &amp;&amp; npm ci --ignore-scripts &amp;&amp; ln -s "$PWD/cli.mjs" ~/.local/bin/perch</code>（需要 Node.js 22.13+）。</p>
       </div>
     </details>
   </div>
 
-  <div class="step-block" data-step="2">  <div class="step-block" data-step="2">
+  <div class="step-block" data-step="2">
+    <h3>按需安装 agent 集成</h3>
+    <p>单独一步，只装您要用的那个。主控需要 OMP 扩展；用 agy 做 worker 时再装 agy 插件。目标文件已存在且不是 Perch 安装的会拒绝覆盖。</p>
+    <div class="code-block">
+      <div class="code-hd"><span>bash · 安装集成</span><button type="button" class="copy-btn">复制</button></div>
+<pre><code>perch integration install omp   # OMP 扩展：/perch 模式、perch 与 board 工具
+perch integration install agy   # 可选：agy hook 插件</code></pre>
+    </div>
+  </div>
+
+  <div class="step-block" data-step="3">
     <h3>写入 <code>~/.omp/agent/config.yml</code>（已按上方所选档位切换）</h3>
     <p>请将 <code>&lt;...&gt;</code> 替换为您自己的模型名称；agy 可用模型可通过 <code>agy models</code> 查看。</p>
 
@@ -1567,7 +1577,7 @@ perch:
     </details>
   </div>
 
-  <div class="step-block" data-step="3">
+  <div class="step-block" data-step="4">
     <h3>写入调度纪律（可选但强烈推荐）</h3>
     <p>新建 <code>~/.omp/agent/PERCH_SYSTEM.md</code>，保留 <code>{{roles}}</code> 占位符让 Perch 自动注入角色表。下面是极简起步版；如需完整版（含七套 SOP 与防过度设计三问），可直接复制上方的 <a href="#prompt-example">完整实战主控提示词</a>：</p>
     <div class="code-block">
@@ -1588,7 +1598,7 @@ perch:
     </div>
   </div>
 
-  <div class="step-block" data-step="4">
+  <div class="step-block" data-step="5">
     <h3>启动试跑</h3>
     <p>打开主控，切入 <code>/perch</code> 模式，试发一条双模型评审或代码排查任务：</p>
     <div class="code-block">

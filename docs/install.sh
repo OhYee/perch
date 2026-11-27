@@ -6,14 +6,15 @@
 # "$PERCH_INSTALL_DIR/perch" (default: ~/.local/bin/perch).
 #
 #   curl -fsSL https://ohyee.github.io/perch/install.sh | sh
-#   curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta --with-omp --with-agy
+#   curl -fsSL https://ohyee.github.io/perch/install.sh | sh -s -- --beta
+#
+# It only installs the perch binary. Agent integrations are a separate,
+# explicit step: perch integration install omp / perch integration install agy
 #
 # Options:
 #   --beta            install the newest release, including pre-releases
 #   --version <v>     install an exact version, e.g. 0.3.0 or 0.4.0-beta-c645e9c22906
 #   --dir <path>      install directory (default: ~/.local/bin, env PERCH_INSTALL_DIR)
-#   --with-omp        run "perch integration install omp" after installing
-#   --with-agy        run "perch integration install agy" after installing
 #   -h, --help        show this help
 #
 # The binary needs no Node.js. Supported: macOS and Linux (glibc), arm64 and x64.
@@ -23,7 +24,6 @@ REPO="OhYee/perch"
 INSTALL_DIR="${PERCH_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${PERCH_VERSION:-}"
 CHANNEL="stable"
-INTEGRATIONS=""
 
 say() { printf '%s\n' "perch-install: $*"; }
 die() { printf '%s\n' "perch-install: error: $*" >&2; exit 1; }
@@ -35,10 +35,8 @@ while [ $# -gt 0 ]; do
     --version=*) VERSION="${1#--version=}" ;;
     --dir) [ $# -ge 2 ] || die "--dir needs a value"; INSTALL_DIR="$2"; shift ;;
     --dir=*) INSTALL_DIR="${1#--dir=}" ;;
-    --with-omp) INTEGRATIONS="$INTEGRATIONS omp" ;;
-    --with-agy) INTEGRATIONS="$INTEGRATIONS agy" ;;
     -h|--help)
-      printf '%s\n' "Usage: install.sh [--beta | --version <v>] [--dir <path>] [--with-omp] [--with-agy]"
+      printf '%s\n' "Usage: install.sh [--beta | --version <v>] [--dir <path>]"
       exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
@@ -120,15 +118,12 @@ fi
 mv -f "$tmp/$asset" "$target"
 say "installed $("$target" --version 2>/dev/null || echo perch) to $target"
 
-for integration in $INTEGRATIONS; do
-  say "running: perch integration install $integration"
-  "$target" integration install "$integration"
-done
-
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *)
     say "$INSTALL_DIR is not in PATH. Add this to your shell profile:"
     printf '\n  export PATH="%s:$PATH"\n\n' "$INSTALL_DIR" ;;
 esac
-say "done. Update later with: perch update"
+say "done. Next, install the agent integrations you use (each is a separate, reviewable step):"
+printf '\n  perch integration install omp   # OMP extension: /perch mode, perch and board tools\n  perch integration install agy   # optional: agy hook plugin\n\n'
+say "update later with: perch update"
